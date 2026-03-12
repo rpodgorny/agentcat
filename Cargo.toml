@@ -2,6 +2,11 @@
 name = "agentcat"
 version = "0.1.0"
 edition = "2024"
+description = "Universal stream formatter for AI coding agent output"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/rpodgorny/agentcat"
+keywords = ["cli", "ai", "agent", "formatter", "terminal"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
