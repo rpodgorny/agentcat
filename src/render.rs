@@ -305,11 +305,17 @@ impl Renderer {
                 // Cost line (if available)
                 if let Some(cost) = cost_usd {
                     if let (Some(inp), Some(out)) = (input_tokens, output_tokens) {
+                        let total_in = inp + cached_tokens.unwrap_or(0);
+                        let cached_str = cached_tokens
+                            .filter(|&c| c > 0)
+                            .map(|c| format!(" ({} cached)", format_number(c)))
+                            .unwrap_or_default();
                         let line = format!(
-                            "{} ${:.4} \u{2014} {} in / {} out tokens\n",
+                            "{} ${:.4} \u{2014} {} in{} / {} out tokens\n",
                             self.style.icon_cost(),
                             cost,
-                            format_number(inp),
+                            format_number(total_in),
+                            cached_str,
                             format_number(out),
                         );
                         self.style.write_yellow(&mut w, &line)?;
