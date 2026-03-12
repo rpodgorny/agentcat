@@ -189,40 +189,79 @@ impl ClaudeParser {
 
     fn parse_user(&self, v: &Value) -> Vec<AgentEvent> {
         let mut events = vec![];
+
+        // Determine if this is a sub-agent message based on parent_tool_use_id
+        let is_subagent = v
+            .get("parent_tool_use_id")
+            .map(|p| !p.is_null())
+            .unwrap_or(false);
+
         // content may be at top level or nested under "message"
         let content = v
             .get("content")
             .or_else(|| v.get("message").and_then(|m| m.get("content")));
 
-        // content can be a string or array
+        // content can be a plain string
+        if let Some(Value::String(s)) = content {
+            if !s.is_empty() {
+                if is_subagent {
+                    events.push(AgentEvent::SubAgentMessage(s.clone()));
+                } else {
+                    events.push(AgentEvent::UserMessage(s.clone()));
+                }
+            }
+            return events;
+        }
+
         let blocks = match content {
             Some(Value::Array(arr)) => arr.clone(),
             _ => return events,
         };
 
+        let mut user_texts = vec![];
+
         for block in &blocks {
             let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            if block_type == "tool_result" {
-                let is_error = block
-                    .get("is_error")
-                    .and_then(|e| e.as_bool())
-                    .unwrap_or(false);
-                let content_val = block.get("content");
-                let content_str = match content_val {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(Value::Array(arr)) => arr
-                        .iter()
-                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    _ => String::new(),
-                };
-                events.push(AgentEvent::ToolResult {
-                    is_error,
-                    content: content_str,
-                });
+            match block_type {
+                "tool_result" => {
+                    let is_error = block
+                        .get("is_error")
+                        .and_then(|e| e.as_bool())
+                        .unwrap_or(false);
+                    let content_val = block.get("content");
+                    let content_str = match content_val {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Array(arr)) => arr
+                            .iter()
+                            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => String::new(),
+                    };
+                    events.push(AgentEvent::ToolResult {
+                        is_error,
+                        content: content_str,
+                    });
+                }
+                "text" => {
+                    let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    if !text.is_empty() {
+                        user_texts.push(text.to_string());
+                    }
+                }
+                _ => {}
             }
         }
+
+        if !user_texts.is_empty() {
+            let joined = user_texts.join("\n");
+            if is_subagent {
+                events.push(AgentEvent::SubAgentMessage(joined));
+            } else {
+                events.push(AgentEvent::UserMessage(joined));
+            }
+        }
+
         events
     }
 
@@ -443,6 +482,37 @@ mod tests {
     }
 
     #[test]
+    fn user_text_message() {
+        let mut p = ClaudeParser::new(false);
+        let events = parse(&mut p, r#"{"type":"user","content":[{"type":"text","text":"Please fix the bug"}]}"#);
+        assert_eq!(events, vec![AgentEvent::UserMessage("Please fix the bug".into())]);
+    }
+
+    #[test]
+    fn user_text_and_tool_result_mixed() {
+        let mut p = ClaudeParser::new(false);
+        let events = parse(&mut p, r#"{"type":"user","content":[{"type":"text","text":"Here is context"},{"type":"tool_result","tool_use_id":"t1","content":"output","is_error":false}]}"#);
+        assert_eq!(events, vec![
+            AgentEvent::ToolResult { is_error: false, content: "output".into() },
+            AgentEvent::UserMessage("Here is context".into()),
+        ]);
+    }
+
+    #[test]
+    fn user_empty_text_ignored() {
+        let mut p = ClaudeParser::new(false);
+        let events = parse(&mut p, r#"{"type":"user","content":[{"type":"text","text":""}]}"#);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn user_plain_string_content() {
+        let mut p = ClaudeParser::new(false);
+        let events = parse(&mut p, r#"{"type":"user","content":"Fix the login bug"}"#);
+        assert_eq!(events, vec![AgentEvent::UserMessage("Fix the login bug".into())]);
+    }
+
+    #[test]
     fn result_success() {
         let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.0042,"num_turns":3,"duration_ms":12345,"duration_api_ms":9800,"usage":{"input_tokens":1500,"output_tokens":800,"cache_read_input_tokens":500}}"#);
@@ -484,6 +554,27 @@ mod tests {
             }
             other => panic!("expected SessionEnd, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn user_text_with_parent_tool_use_id_emits_subagent_message() {
+        let mut p = ClaudeParser::new(false);
+        let events = parse(&mut p, r#"{"type":"user","parent_tool_use_id":"toolu_abc","content":[{"type":"text","text":"Investigate the error"}]}"#);
+        assert_eq!(events, vec![AgentEvent::SubAgentMessage("Investigate the error".into())]);
+    }
+
+    #[test]
+    fn user_text_with_null_parent_tool_use_id_emits_user_message() {
+        let mut p = ClaudeParser::new(false);
+        let events = parse(&mut p, r#"{"type":"user","parent_tool_use_id":null,"content":[{"type":"text","text":"Fix the bug"}]}"#);
+        assert_eq!(events, vec![AgentEvent::UserMessage("Fix the bug".into())]);
+    }
+
+    #[test]
+    fn user_plain_string_with_parent_tool_use_id_emits_subagent_message() {
+        let mut p = ClaudeParser::new(false);
+        let events = parse(&mut p, r#"{"type":"user","parent_tool_use_id":"toolu_xyz","content":"Search for files"}"#);
+        assert_eq!(events, vec![AgentEvent::SubAgentMessage("Search for files".into())]);
     }
 
     #[test]

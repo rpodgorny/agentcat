@@ -238,6 +238,16 @@ impl Renderer {
                 let msg = format!("{} Context compacted\n", self.style.icon_compact());
                 self.style.write_dim(&mut w, &msg)?;
             }
+            AgentEvent::UserMessage(message) => {
+                self.ensure_newline(&mut w)?;
+                let msg = format!("{} {}\n", self.style.icon_user(), message);
+                self.style.write_magenta(&mut w, &msg)?;
+            }
+            AgentEvent::SubAgentMessage(message) => {
+                self.ensure_newline(&mut w)?;
+                let msg = format!("{} {}\n", self.style.icon_subagent(), message);
+                self.style.write_magenta(&mut w, &msg)?;
+            }
             AgentEvent::Warning(message) => {
                 self.ensure_newline(&mut w)?;
                 let msg = format!("{} {}\n", self.style.icon_warn(), message);

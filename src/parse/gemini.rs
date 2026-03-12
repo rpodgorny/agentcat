@@ -35,15 +35,18 @@ impl EventParser for GeminiParser {
                 }])
             }
             "message" => {
-                let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
-                if role == "user" {
-                    return Ok(vec![]); // ignore echoed prompt
-                }
                 let content = v
                     .get("content")
                     .and_then(|c| c.as_str())
                     .unwrap_or("")
                     .to_string();
+                let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                if role == "user" {
+                    if content.is_empty() {
+                        return Ok(vec![]);
+                    }
+                    return Ok(vec![AgentEvent::UserMessage(content)]);
+                }
                 let delta = v.get("delta").and_then(|d| d.as_bool()).unwrap_or(false);
                 if delta {
                     Ok(vec![AgentEvent::TextDelta(content)])
@@ -186,9 +189,16 @@ mod tests {
     }
 
     #[test]
-    fn message_user_ignored() {
+    fn message_user_rendered() {
         let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message","role":"user","content":"my prompt"}"#);
+        assert_eq!(events, vec![AgentEvent::UserMessage("my prompt".into())]);
+    }
+
+    #[test]
+    fn message_user_empty_ignored() {
+        let mut p = GeminiParser::new(false);
+        let events = parse(&mut p, r#"{"type":"message","role":"user","content":""}"#);
         assert!(events.is_empty());
     }
 

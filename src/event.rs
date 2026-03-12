@@ -47,6 +47,8 @@ pub enum AgentEvent {
         content: String,
     },
     Compaction,
+    UserMessage(String),
+    SubAgentMessage(String),
     Warning(String),
     SessionEnd {
         success: bool,

@@ -35,6 +35,14 @@ impl Style {
         if self.use_emoji { "\u{26a0}\u{fe0f}" } else { "[warn]" }
     }
 
+    pub fn icon_user(&self) -> &str {
+        if self.use_emoji { "\u{1f464}" } else { "[user]" }
+    }
+
+    pub fn icon_subagent(&self) -> &str {
+        if self.use_emoji { "\u{1f916}" } else { "[subagent]" }
+    }
+
     pub fn icon_compact(&self) -> &str {
         if self.use_emoji { "\u{1f4e6}" } else { "[compact]" }
     }
@@ -92,6 +100,15 @@ impl Style {
     pub fn write_red(&self, w: &mut impl Write, text: &str) -> io::Result<()> {
         if self.use_color {
             write!(w, "{}{}{}", SetForegroundColor(Color::Red), text, ResetColor)?;
+        } else {
+            write!(w, "{}", text)?;
+        }
+        Ok(())
+    }
+
+    pub fn write_magenta(&self, w: &mut impl Write, text: &str) -> io::Result<()> {
+        if self.use_color {
+            write!(w, "{}{}{}", SetForegroundColor(Color::Magenta), text, ResetColor)?;
         } else {
             write!(w, "{}", text)?;
         }
