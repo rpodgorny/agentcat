@@ -1,3 +1,6 @@
+build:
+  cargo build --release
+
 clippy:
   cargo clippy
 
@@ -6,3 +9,7 @@ test:
 
 publish:
   cargo publish
+
+clean:
+  cargo clean
+  rm -rf pkg/ src/agentcat-git/ agentcat-git/ *.pkg.tar.zst
