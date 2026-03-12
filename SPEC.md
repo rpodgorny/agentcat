@@ -197,6 +197,9 @@ The `error` field on the assistant message is non-null if the response hit an er
 
 Tool results sent back to Claude after tool execution.
 
+The `tool_result` blocks may appear at the top level (`content`) or nested under `message.content` — the parser must check both locations.
+
+**Top-level format (with `--include-partial-messages`):**
 ```json
 {
   "type": "user",
@@ -213,7 +216,28 @@ Tool results sent back to Claude after tool execution.
 }
 ```
 
-The `content` field can be a string or an array of content blocks.
+**Nested format (without `--include-partial-messages`, or `-p` mode):**
+```json
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "tool_use_id": "toolu_abc",
+        "content": "hello_world",
+        "is_error": false
+      }
+    ]
+  },
+  "parent_tool_use_id": null,
+  "session_id": "abc-123",
+  "uuid": "msg-456"
+}
+```
+
+The `content` field within each `tool_result` block can be a string or an array of content blocks.
 
 ### `result` Message
 
@@ -1009,18 +1033,52 @@ Format: `🔧 {tool_name}: {compact_summary_of_input}`
 | MCP tool calls | `"{server}/{tool}"` |
 | Other | tool name + first ~60 chars of JSON input |
 
-**On `ToolResult`:**
+**Per-tool inline spinner (TTY only):**
+
+Each tool gets its own spinner on the line directly below its header. The spinner shows elapsed time and animates at 80ms intervals using braille frames (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), or ASCII (`|/-\`) when `--no-emoji` is set.
+
+When tools run in parallel (multiple `ToolReady` events before any `ToolResult`), each tool occupies 2 lines (header + status). ANSI cursor movement (`\x1b[nA` / `\x1b[nB`) is used to update each tool's status line independently. The cursor always returns to the "home" position (line after the last status line). The status line offset for slot `i` of `N` tools is `(N - i) * 2 - 1` lines above home.
+
 ```
-  ✅ (3 lines)
-  ✅ exit 0 (5 lines)
-  ❌ Error: command not found
-  ❌ exit 1: permission denied
+🔧 Read: file1.rs
+  ⠹ running... (0.5s)          ← spinner, updated in-place
+🔧 Read: file2.rs
+  ⠹ running... (0.3s)
+🔧 Bash: ls -la
+  ⠹ running... (0.2s)
 ```
 
-For tool results:
-- Success: `✅` + line count of result content
-- Error: `❌` + first line of error message
+**On `ToolResult`:**
+
+Each result replaces the spinner for its corresponding tool (FIFO order). Cursor movement updates only that tool's status line.
+
+```
+🔧 Read: file1.rs
+  ✅ (10 lines, 0.8s)           ← first result replaces first spinner
+🔧 Read: file2.rs
+  ⠹ running... (0.6s)          ← still running
+🔧 Bash: ls -la
+  ✅ (3 lines, 2.0s)            ← third result
+```
+
+Result format:
+- Success: `  ✅ ({N} line(s), {elapsed}s)` — line count of result content + elapsed time
+- Success (empty content): `  ✅ ({elapsed}s)`
+- Error: `  ❌ {first_line_of_error}, {elapsed}s`
 - For Codex command executions with non-zero exit code, show `exit {code}`
+
+**Non-TTY (piped output):**
+
+No cursor movement or spinners. Tool headers are printed as they arrive; completion marks are appended sequentially below:
+
+```
+🔧 Read: file1.rs
+🔧 Read: file2.rs
+🔧 Bash: ls -la
+  ✅ (10 lines, 0.8s)
+  ✅ (50 lines, 1.2s)
+  ✅ (3 lines, 2.0s)
+```
 
 ### Thinking / Reasoning Blocks
 

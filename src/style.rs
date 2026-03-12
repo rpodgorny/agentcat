@@ -51,6 +51,16 @@ impl Style {
         if self.use_emoji { "\u{1f4ca}" } else { "[stats]" }
     }
 
+    pub fn spinner_frame(&self, index: usize) -> &str {
+        if self.use_emoji {
+            const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            FRAMES[index % FRAMES.len()]
+        } else {
+            const FRAMES: &[&str] = &["|", "/", "-", "\\"];
+            FRAMES[index % FRAMES.len()]
+        }
+    }
+
     pub fn write_bold_cyan(&self, w: &mut impl Write, text: &str) -> io::Result<()> {
         if self.use_color {
             write!(w, "{}{}{}{}", SetAttribute(Attribute::Bold), SetForegroundColor(Color::Cyan), text, ResetColor)?;

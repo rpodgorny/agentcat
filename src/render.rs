@@ -3,26 +3,82 @@ use crate::style::Style;
 use std::io::{self, Write};
 use std::time::Instant;
 
+struct ToolSlot {
+    start_time: Instant,
+    spinner_frame: usize,
+    completed: bool,
+}
+
 pub struct Renderer {
     style: Style,
     show_thinking: bool,
     thinking_start: Option<Instant>,
     needs_newline_before_tool: bool,
+    tool_slots: Vec<ToolSlot>,
+    is_tty: bool,
 }
 
 impl Renderer {
-    pub fn new(show_thinking: bool, use_emoji: bool, use_color: bool) -> Self {
+    pub fn new(show_thinking: bool, use_emoji: bool, use_color: bool, is_tty: bool) -> Self {
         Self {
             style: Style::new(use_emoji, use_color),
             show_thinking,
             thinking_start: None,
             needs_newline_before_tool: false,
+            tool_slots: Vec::new(),
+            is_tty,
         }
+    }
+
+    pub fn spinner_active(&self) -> bool {
+        self.is_tty && self.tool_slots.iter().any(|s| !s.completed)
+    }
+
+    pub fn tick_spinner(&mut self) -> io::Result<()> {
+        if !self.is_tty {
+            return Ok(());
+        }
+        let n = self.tool_slots.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let stdout = io::stdout();
+        let mut w = stdout.lock();
+        for (i, slot) in self.tool_slots.iter_mut().enumerate() {
+            if slot.completed {
+                continue;
+            }
+            let elapsed = slot.start_time.elapsed().as_secs_f64();
+            let offset = (n - i) * 2 - 1;
+            // Move up to status line, clear it, write spinner, move back
+            write!(w, "\x1b[{}A\x1b[2K\r", offset)?;
+            let frame = self.style.spinner_frame(slot.spinner_frame);
+            slot.spinner_frame += 1;
+            let line = format!("  {} running... ({:.1}s)", frame, elapsed);
+            self.style.write_dim(&mut w, &line)?;
+            write!(w, "\x1b[{}B\r", offset)?;
+        }
+        w.flush()?;
+        Ok(())
     }
 
     pub fn render(&mut self, event: AgentEvent) -> io::Result<()> {
         let stdout = io::stdout();
         let mut w = stdout.lock();
+
+        // Defensive: unexpected events while tools are active → clear tool state
+        // Allow ToolReady, ToolStart, ToolResult through
+        if !self.tool_slots.is_empty()
+            && !matches!(
+                event,
+                AgentEvent::ToolReady { .. }
+                    | AgentEvent::ToolStart { .. }
+                    | AgentEvent::ToolResult { .. }
+            )
+        {
+            self.tool_slots.clear();
+        }
+
         match event {
             AgentEvent::SessionStart {
                 session_id,
@@ -93,6 +149,7 @@ impl Renderer {
                 tool_name,
                 input_summary,
             } => {
+                // Write tool header
                 let line = format!(
                     "{} {}: {}\n",
                     self.style.icon_tool(),
@@ -100,29 +157,80 @@ impl Renderer {
                     input_summary
                 );
                 self.style.write_cyan(&mut w, &line)?;
+
+                if self.is_tty {
+                    // Write initial spinner line
+                    let frame = self.style.spinner_frame(0);
+                    let spinner_line = format!("  {} running... (0.0s)\n", frame);
+                    self.style.write_dim(&mut w, &spinner_line)?;
+                }
+
+                self.tool_slots.push(ToolSlot {
+                    start_time: Instant::now(),
+                    spinner_frame: 1,
+                    completed: false,
+                });
             }
             AgentEvent::ToolResult { is_error, content } => {
-                if is_error {
+                // Find first non-completed slot (FIFO)
+                let slot_idx = self.tool_slots.iter().position(|s| !s.completed);
+
+                let elapsed = slot_idx.map(|i| self.tool_slots[i].start_time.elapsed().as_secs_f64());
+                let elapsed_str = elapsed
+                    .map(|d| format!(", {:.1}s", d))
+                    .unwrap_or_default();
+
+                let result_line = if is_error {
                     let first_line = content.lines().next().unwrap_or(&content);
-                    let msg = format!("  {} {}\n", self.style.icon_err(), first_line);
-                    self.style.write_red(&mut w, &msg)?;
+                    format!("  {} {}{}", self.style.icon_err(), first_line, elapsed_str)
                 } else {
                     let line_count = if content.is_empty() {
                         0
                     } else {
                         content.lines().count()
                     };
-                    let msg = if line_count > 0 {
+                    if line_count > 0 {
                         format!(
-                            "  {} ({} line{})\n",
+                            "  {} ({} line{}{})",
                             self.style.icon_ok(),
                             line_count,
-                            if line_count == 1 { "" } else { "s" }
+                            if line_count == 1 { "" } else { "s" },
+                            elapsed_str,
                         )
                     } else {
-                        format!("  {}\n", self.style.icon_ok())
-                    };
-                    self.style.write_green(&mut w, &msg)?;
+                        format!("  {}{}", self.style.icon_ok(), elapsed_str)
+                    }
+                };
+
+                if self.is_tty {
+                    if let Some(i) = slot_idx {
+                        let n = self.tool_slots.len();
+                        let offset = (n - i) * 2 - 1;
+                        // Move up to status line, clear, write result, move back
+                        write!(w, "\x1b[{}A\x1b[2K\r", offset)?;
+                        if is_error {
+                            self.style.write_red(&mut w, &result_line)?;
+                        } else {
+                            self.style.write_green(&mut w, &result_line)?;
+                        }
+                        write!(w, "\x1b[{}B\r", offset)?;
+                        self.tool_slots[i].completed = true;
+                    }
+                } else {
+                    // Non-TTY: write result at current position
+                    if let Some(i) = slot_idx {
+                        self.tool_slots[i].completed = true;
+                    }
+                    if is_error {
+                        self.style.write_red(&mut w, &format!("{}\n", result_line))?;
+                    } else {
+                        self.style.write_green(&mut w, &format!("{}\n", result_line))?;
+                    }
+                }
+
+                // If all completed, clear slots
+                if self.tool_slots.iter().all(|s| s.completed) {
+                    self.tool_slots.clear();
                 }
             }
             AgentEvent::Compaction => {

@@ -9,6 +9,7 @@ use parse::{Format, create_parser, detect_format};
 use render::Renderer;
 use std::process;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::time;
 
 #[derive(Parser)]
 #[command(name = "agentcat", version, about = "Rich terminal renderer for AI coding agent streams")]
@@ -34,9 +35,10 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
 
+    let is_tty = std::io::stdout().is_tty();
     let use_color = !cli.no_color
         && std::env::var("NO_COLOR").is_err()
-        && std::io::stdout().is_tty();
+        && is_tty;
     let use_emoji = !cli.no_emoji;
 
     let forced_format = cli.format.as_deref().map(|f| match f {
@@ -80,7 +82,7 @@ async fn main() {
     };
 
     let mut parser = create_parser(format);
-    let mut renderer = Renderer::new(cli.show_thinking, use_emoji, use_color);
+    let mut renderer = Renderer::new(cli.show_thinking, use_emoji, use_color, is_tty);
     let mut last_success = true;
 
     // Process first line
@@ -102,35 +104,50 @@ async fn main() {
         }
     }
 
-    // Process remaining lines
+    // Process remaining lines with spinner support
+    let mut tick = time::interval(time::Duration::from_millis(80));
+    tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    // Consume the first immediate tick
+    tick.tick().await;
+
     loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                match parser.parse(&line) {
-                    Ok(events) => {
-                        for event in events {
-                            if let event::AgentEvent::SessionEnd { success, .. } = &event {
-                                last_success = *success;
+        tokio::select! {
+            result = lines.next_line() => {
+                match result {
+                    Ok(Some(line)) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        match parser.parse(&line) {
+                            Ok(events) => {
+                                for event in events {
+                                    if let event::AgentEvent::SessionEnd { success, .. } = &event {
+                                        last_success = *success;
+                                    }
+                                    if let Err(e) = renderer.render(event) {
+                                        eprintln!("Render error: {}", e);
+                                        process::exit(2);
+                                    }
+                                }
                             }
-                            if let Err(e) = renderer.render(event) {
-                                eprintln!("Render error: {}", e);
-                                process::exit(2);
+                            Err(e) => {
+                                eprintln!("Parse error: {}", e);
+                                // Don't exit on single parse errors, continue
                             }
                         }
                     }
+                    Ok(None) => break,
                     Err(e) => {
-                        eprintln!("Parse error: {}", e);
-                        // Don't exit on single parse errors, continue
+                        eprintln!("Error reading stdin: {}", e);
+                        process::exit(2);
                     }
                 }
             }
-            Ok(None) => break,
-            Err(e) => {
-                eprintln!("Error reading stdin: {}", e);
-                process::exit(2);
+            _ = tick.tick(), if renderer.spinner_active() => {
+                if let Err(e) = renderer.tick_spinner() {
+                    eprintln!("Render error: {}", e);
+                    process::exit(2);
+                }
             }
         }
     }

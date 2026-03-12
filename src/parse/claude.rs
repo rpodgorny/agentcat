@@ -165,7 +165,10 @@ impl ClaudeParser {
 
     fn parse_user(&self, v: &Value) -> Vec<AgentEvent> {
         let mut events = vec![];
-        let content = v.get("content");
+        // content may be at top level or nested under "message"
+        let content = v
+            .get("content")
+            .or_else(|| v.get("message").and_then(|m| m.get("content")));
 
         // content can be a string or array
         let blocks = match content {
@@ -386,6 +389,16 @@ mod tests {
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: true,
             content: "permission denied".into(),
+        }]);
+    }
+
+    #[test]
+    fn user_tool_result_nested_under_message() {
+        let mut p = ClaudeParser::new();
+        let events = parse(&mut p, r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc","content":"hello_world","is_error":false}]}}"#);
+        assert_eq!(events, vec![AgentEvent::ToolResult {
+            is_error: false,
+            content: "hello_world".into(),
         }]);
     }
 
