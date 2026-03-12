@@ -12,13 +12,15 @@ enum BlockState {
 pub struct ClaudeParser {
     block_state: BlockState,
     saw_stream_events: bool,
+    debug: bool,
 }
 
 impl ClaudeParser {
-    pub fn new() -> Self {
+    pub fn new(debug: bool) -> Self {
         Self {
             block_state: BlockState::None,
             saw_stream_events: false,
+            debug,
         }
     }
 
@@ -57,7 +59,12 @@ impl ClaudeParser {
                         };
                         events
                     }
-                    _ => vec![],
+                    other => {
+                        if self.debug {
+                            eprintln!("debug: unknown claude content_block_start type: {}", other);
+                        }
+                        vec![]
+                    }
                 }
             }
             "content_block_delta" => {
@@ -85,7 +92,13 @@ impl ClaudeParser {
                         }
                         vec![]
                     }
-                    _ => vec![],
+                    "signature_delta" => vec![],
+                    other => {
+                        if self.debug {
+                            eprintln!("debug: unknown claude content_block_delta type: {}", other);
+                        }
+                        vec![]
+                    },
                 }
             }
             "content_block_stop" => {
@@ -104,7 +117,13 @@ impl ClaudeParser {
                     _ => vec![],
                 }
             }
-            _ => vec![],
+            "message_start" | "message_delta" | "message_stop" | "ping" | "error" => vec![],
+            other => {
+                if self.debug {
+                    eprintln!("debug: unknown claude stream event type: {}", other);
+                }
+                vec![]
+            }
         }
     }
 
@@ -157,7 +176,12 @@ impl ClaudeParser {
                     events.push(AgentEvent::ThinkingDelta(thinking.to_string()));
                     events.push(AgentEvent::ThinkingEnd);
                 }
-                _ => {}
+                "tool_result" => {}
+                other => {
+                    if self.debug {
+                        eprintln!("debug: unknown claude assistant block type: {}", other);
+                    }
+                }
             }
         }
         events
@@ -256,14 +280,30 @@ impl EventParser for ClaudeParser {
                         }])
                     }
                     "compact_boundary" => Ok(vec![AgentEvent::Compaction]),
-                    _ => Ok(vec![]),
+                    "status" => Ok(vec![]),
+                    other => {
+                        if self.debug {
+                            eprintln!("debug: unknown claude system subtype: {}", other);
+                        }
+                        Ok(vec![])
+                    }
                 }
             }
             "stream_event" => Ok(self.parse_stream_event(&v)),
             "assistant" => Ok(self.parse_assistant(&v)),
             "user" => Ok(self.parse_user(&v)),
             "result" => Ok(self.parse_result(&v)),
-            _ => Ok(vec![]), // silently ignore unknown
+            "hook_started" | "hook_progress" | "hook_response"
+            | "tool_progress" | "tool_use_summary"
+            | "auth_status"
+            | "task_started" | "task_progress" | "task_notification"
+            | "files_persisted" | "rate_limit_event" | "prompt_suggestion" => Ok(vec![]),
+            other => {
+                if self.debug {
+                    eprintln!("debug: unknown claude event type: {}", other);
+                }
+                Ok(vec![])
+            }
         }
     }
 
@@ -283,7 +323,7 @@ mod tests {
 
     #[test]
     fn system_init() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"system","subtype":"init","session_id":"abc-123"}"#);
         assert_eq!(events, vec![AgentEvent::SessionStart {
             session_id: "abc-123".into(),
@@ -294,21 +334,21 @@ mod tests {
 
     #[test]
     fn system_compact_boundary() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"system","subtype":"compact_boundary"}"#);
         assert_eq!(events, vec![AgentEvent::Compaction]);
     }
 
     #[test]
     fn stream_event_text_delta() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}}"#);
         assert_eq!(events, vec![AgentEvent::TextDelta("Hello".into())]);
     }
 
     #[test]
     fn stream_event_tool_use_flow() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
 
         // content_block_start tool_use
         let e1 = parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_abc","name":"Bash"}}}"#);
@@ -336,7 +376,7 @@ mod tests {
 
     #[test]
     fn stream_event_thinking_flow() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
 
         let e1 = parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}}"#);
         assert_eq!(e1, vec![AgentEvent::ThinkingStart]);
@@ -350,7 +390,7 @@ mod tests {
 
     #[test]
     fn assistant_message_no_prior_stream_events() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}},{"type":"thinking","thinking":"hmm"}]}}"#);
         assert_eq!(events, vec![
             AgentEvent::TextComplete("Hello".into()),
@@ -364,7 +404,7 @@ mod tests {
 
     #[test]
     fn assistant_message_after_stream_events_suppressed() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         // Trigger saw_stream_events by parsing a stream_event first
         parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}}"#);
         // Now assistant should be suppressed
@@ -374,7 +414,7 @@ mod tests {
 
     #[test]
     fn user_tool_result() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc","content":"file1.rs\nfile2.rs","is_error":false}]}"#);
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: false,
@@ -384,7 +424,7 @@ mod tests {
 
     #[test]
     fn user_tool_result_error() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc","content":"permission denied","is_error":true}]}"#);
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: true,
@@ -394,7 +434,7 @@ mod tests {
 
     #[test]
     fn user_tool_result_nested_under_message() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc","content":"hello_world","is_error":false}]}}"#);
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: false,
@@ -404,7 +444,7 @@ mod tests {
 
     #[test]
     fn result_success() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.0042,"num_turns":3,"duration_ms":12345,"duration_api_ms":9800,"usage":{"input_tokens":1500,"output_tokens":800,"cache_read_input_tokens":500}}"#);
         assert_eq!(events, vec![AgentEvent::SessionEnd {
             success: true,
@@ -422,7 +462,7 @@ mod tests {
 
     #[test]
     fn result_error_max_turns() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#);
         match &events[0] {
             AgentEvent::SessionEnd { success, error_type, .. } => {
@@ -435,7 +475,7 @@ mod tests {
 
     #[test]
     fn result_error_during_execution() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#);
         match &events[0] {
             AgentEvent::SessionEnd { success, error_type, .. } => {
@@ -448,14 +488,14 @@ mod tests {
 
     #[test]
     fn unknown_type_returns_empty() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"unknown_future_type","data":{}}"#);
         assert!(events.is_empty());
     }
 
     #[test]
     fn invalid_json_returns_error() {
-        let mut p = ClaudeParser::new();
+        let mut p = ClaudeParser::new(false);
         assert!(p.parse("not json").is_err());
     }
 }

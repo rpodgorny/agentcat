@@ -30,12 +30,12 @@ pub fn detect_format(first_line: &str) -> Result<Format, String> {
     }
 }
 
-pub fn create_parser(format: Format) -> Box<dyn EventParser> {
+pub fn create_parser(format: Format, debug: bool) -> Box<dyn EventParser> {
     match format {
-        Format::Claude => Box::new(claude::ClaudeParser::new()),
-        Format::Pi => Box::new(pi::PiParser::new()),
-        Format::Gemini => Box::new(gemini::GeminiParser::new()),
-        Format::Codex => Box::new(codex::CodexParser::new()),
+        Format::Claude => Box::new(claude::ClaudeParser::new(debug)),
+        Format::Pi => Box::new(pi::PiParser::new(debug)),
+        Format::Gemini => Box::new(gemini::GeminiParser::new(debug)),
+        Format::Codex => Box::new(codex::CodexParser::new(debug)),
     }
 }
 

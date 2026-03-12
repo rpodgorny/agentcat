@@ -29,6 +29,10 @@ struct Cli {
     /// Force input format: claude, pi, gemini, codex (default: auto-detect)
     #[arg(long)]
     format: Option<String>,
+
+    /// Print warnings for unknown event types to stderr
+    #[arg(long)]
+    debug: bool,
 }
 
 #[tokio::main]
@@ -81,7 +85,7 @@ async fn main() {
         },
     };
 
-    let mut parser = create_parser(format);
+    let mut parser = create_parser(format, cli.debug);
     let mut renderer = Renderer::new(cli.show_thinking, use_emoji, use_color, is_tty);
     let mut last_success = true;
 

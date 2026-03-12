@@ -9,10 +9,11 @@ pub struct CodexParser {
     had_error: bool,
     error_message: Option<String>,
     session_id: String,
+    debug: bool,
 }
 
 impl CodexParser {
-    pub fn new() -> Self {
+    pub fn new(debug: bool) -> Self {
         Self {
             accumulated_input_tokens: 0,
             accumulated_output_tokens: 0,
@@ -20,6 +21,7 @@ impl CodexParser {
             had_error: false,
             error_message: None,
             session_id: String::new(),
+            debug,
         }
     }
 
@@ -60,7 +62,14 @@ impl CodexParser {
                 let name = format!("{}/{}", server, tool);
                 vec![AgentEvent::ToolStart { tool_name: name }]
             }
-            _ => vec![],
+            "agent_message" | "web_search" | "context_compaction"
+            | "collab_tool_call" | "todo_list" | "error" => vec![],
+            other => {
+                if self.debug {
+                    eprintln!("debug: unknown codex item.started type: {}", other);
+                }
+                vec![]
+            }
         }
     }
 
@@ -178,7 +187,13 @@ impl CodexParser {
                 ]
             }
             "context_compaction" => vec![AgentEvent::Compaction],
-            _ => vec![],
+            "collab_tool_call" | "todo_list" | "error" => vec![],
+            other => {
+                if self.debug {
+                    eprintln!("debug: unknown codex item.completed type: {}", other);
+                }
+                vec![]
+            }
         }
     }
 }
@@ -245,7 +260,13 @@ impl EventParser for CodexParser {
                     .map(|s| s.to_string());
                 Ok(vec![])
             }
-            _ => Ok(vec![]),
+            "turn.started" | "item.updated" => Ok(vec![]),
+            other => {
+                if self.debug {
+                    eprintln!("debug: unknown codex event type: {}", other);
+                }
+                Ok(vec![])
+            }
         }
     }
 
@@ -296,7 +317,7 @@ mod tests {
 
     #[test]
     fn thread_started() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"thread.started","thread_id":"0199a213-81c0-7800"}"#);
         assert_eq!(events, vec![AgentEvent::SessionStart {
             session_id: "0199a213-81c0-7800".into(),
@@ -307,7 +328,7 @@ mod tests {
 
     #[test]
     fn item_started_command_execution() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"bash -lc ls","cwd":"/project","status":"in_progress"}}"#);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0], AgentEvent::ToolStart { tool_name: "Bash".into() });
@@ -322,7 +343,7 @@ mod tests {
 
     #[test]
     fn item_completed_command_execution_success() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc ls","status":"completed","exitCode":0,"aggregatedOutput":"docs\nsdk\n"}}"#);
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: false,
@@ -332,7 +353,7 @@ mod tests {
 
     #[test]
     fn item_completed_command_execution_failure() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc bad","status":"completed","exitCode":1,"aggregatedOutput":"error: not found\ndetails"}}"#);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -346,21 +367,21 @@ mod tests {
 
     #[test]
     fn item_completed_agent_message() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Repo contains docs, sdk, and examples directories."}}"#);
         assert_eq!(events, vec![AgentEvent::TextComplete("Repo contains docs, sdk, and examples directories.".into())]);
     }
 
     #[test]
     fn item_started_reasoning() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.started","item":{"id":"item_4","type":"reasoning","summary":[],"content":[]}}"#);
         assert_eq!(events, vec![AgentEvent::ThinkingStart]);
     }
 
     #[test]
     fn item_completed_reasoning() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_4","type":"reasoning","summary":[{"type":"summaryText","text":"Analyzing the repository structure..."}],"content":[]}}"#);
         assert_eq!(events, vec![
             AgentEvent::ThinkingDelta("Analyzing the repository structure...".into()),
@@ -370,14 +391,14 @@ mod tests {
 
     #[test]
     fn item_started_file_change() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.started","item":{"id":"item_2","type":"file_change"}}"#);
         assert_eq!(events, vec![AgentEvent::ToolStart { tool_name: "FileChange".into() }]);
     }
 
     #[test]
     fn item_completed_file_change() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_2","type":"file_change","status":"completed","changes":[{"path":"src/main.rs","kind":"edit","diff":"..."}]}}"#);
         assert_eq!(events.len(), 2);
         match &events[0] {
@@ -392,7 +413,7 @@ mod tests {
 
     #[test]
     fn item_completed_mcp_tool_call() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_5","type":"mcp_tool_call","server":"my-server","tool":"search","status":"completed","arguments":{"query":"hello"},"result":"Search results..."}}"#);
         assert_eq!(events.len(), 2);
         match &events[0] {
@@ -406,7 +427,7 @@ mod tests {
 
     #[test]
     fn item_completed_web_search() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_6","type":"web_search","query":"rust async stdin","action":"search"}}"#);
         assert_eq!(events, vec![
             AgentEvent::ToolStart { tool_name: "WebSearch".into() },
@@ -417,14 +438,14 @@ mod tests {
 
     #[test]
     fn item_completed_context_compaction() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_7","type":"context_compaction"}}"#);
         assert_eq!(events, vec![AgentEvent::Compaction]);
     }
 
     #[test]
     fn turn_completed_accumulates_tokens() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"output_tokens":122}}"#);
         assert!(events.is_empty());
         assert_eq!(p.accumulated_input_tokens, 24763);
@@ -434,7 +455,7 @@ mod tests {
 
     #[test]
     fn turn_failed_sets_error() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"turn.failed","error":{"message":"Context window exceeded","codexErrorInfo":"ContextWindowExceeded"}}"#);
         assert!(events.is_empty());
         assert!(p.had_error);
@@ -443,7 +464,7 @@ mod tests {
 
     #[test]
     fn error_event_sets_error() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"error","error":{"message":"Context window exceeded"}}"#);
         assert!(events.is_empty());
         assert!(p.had_error);
@@ -451,7 +472,7 @@ mod tests {
 
     #[test]
     fn finish_after_success() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         parse(&mut p, r#"{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":200}}"#);
         let events = p.finish();
         assert_eq!(events, vec![AgentEvent::SessionEnd {
@@ -470,7 +491,7 @@ mod tests {
 
     #[test]
     fn finish_after_turn_failed() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         parse(&mut p, r#"{"type":"turn.failed","error":{"message":"Exceeded"}}"#);
         let events = p.finish();
         match &events[0] {
@@ -485,7 +506,7 @@ mod tests {
 
     #[test]
     fn multi_turn_accumulation() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         parse(&mut p, r#"{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":500,"output_tokens":100}}"#);
         parse(&mut p, r#"{"type":"turn.completed","usage":{"input_tokens":2000,"cached_input_tokens":1500,"output_tokens":200}}"#);
         let events = p.finish();
@@ -505,7 +526,7 @@ mod tests {
 
     #[test]
     fn unknown_type_returns_empty() {
-        let mut p = CodexParser::new();
+        let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"future_event","data":{}}"#);
         assert!(events.is_empty());
     }

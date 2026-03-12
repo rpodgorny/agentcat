@@ -2,11 +2,13 @@ use crate::event::{AgentEvent, AgentKind};
 use crate::parse::{tool_summary, EventParser};
 use serde_json::Value;
 
-pub struct GeminiParser {}
+pub struct GeminiParser {
+    debug: bool,
+}
 
 impl GeminiParser {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(debug: bool) -> Self {
+        Self { debug }
     }
 }
 
@@ -135,7 +137,12 @@ impl EventParser for GeminiParser {
                         .and_then(|t| t.as_u64()),
                 }])
             }
-            _ => Ok(vec![]),
+            other => {
+                if self.debug {
+                    eprintln!("debug: unknown gemini event type: {}", other);
+                }
+                Ok(vec![])
+            }
         }
     }
 
@@ -155,7 +162,7 @@ mod tests {
 
     #[test]
     fn init_event() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"init","timestamp":"2025-10-10T12:00:00.000Z","session_id":"test-session-123","model":"gemini-2.5-pro"}"#);
         assert_eq!(events, vec![AgentEvent::SessionStart {
             session_id: "test-session-123".into(),
@@ -166,28 +173,28 @@ mod tests {
 
     #[test]
     fn message_assistant_delta() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message","role":"assistant","content":"The answer","delta":true}"#);
         assert_eq!(events, vec![AgentEvent::TextDelta("The answer".into())]);
     }
 
     #[test]
     fn message_assistant_complete() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message","role":"assistant","content":"Full response","delta":false}"#);
         assert_eq!(events, vec![AgentEvent::TextComplete("Full response".into())]);
     }
 
     #[test]
     fn message_user_ignored() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message","role":"user","content":"my prompt"}"#);
         assert!(events.is_empty());
     }
 
     #[test]
     fn tool_use_event() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"tool_use","tool_name":"Read","tool_id":"read-123","parameters":{"file_path":"/path/to/file.txt"}}"#);
         assert_eq!(events, vec![
             AgentEvent::ToolStart { tool_name: "Read".into() },
@@ -200,7 +207,7 @@ mod tests {
 
     #[test]
     fn tool_result_success() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"tool_result","tool_id":"read-123","status":"success","output":"file contents here"}"#);
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: false,
@@ -210,7 +217,7 @@ mod tests {
 
     #[test]
     fn tool_result_error() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"tool_result","tool_id":"read-123","status":"error","error":{"type":"FILE_NOT_FOUND","message":"File not found"}}"#);
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: true,
@@ -220,14 +227,14 @@ mod tests {
 
     #[test]
     fn error_event_warning() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"error","severity":"warning","message":"Loop detected, stopping execution"}"#);
         assert_eq!(events, vec![AgentEvent::Warning("Loop detected, stopping execution".into())]);
     }
 
     #[test]
     fn result_success() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"result","status":"success","stats":{"duration_ms":3200,"input_tokens":150,"output_tokens":100,"cached":50}}"#);
         assert_eq!(events, vec![AgentEvent::SessionEnd {
             success: true,
@@ -245,7 +252,7 @@ mod tests {
 
     #[test]
     fn result_error() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"result","status":"error","error":{"type":"MaxSessionTurnsError","message":"Maximum session turns exceeded"},"stats":{}}"#);
         match &events[0] {
             AgentEvent::SessionEnd { success, error_type, error_message, .. } => {
@@ -259,7 +266,7 @@ mod tests {
 
     #[test]
     fn unknown_type_returns_empty() {
-        let mut p = GeminiParser::new();
+        let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"future_event","data":{}}"#);
         assert!(events.is_empty());
     }

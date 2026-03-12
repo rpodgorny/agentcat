@@ -5,13 +5,15 @@ use serde_json::Value;
 pub struct PiParser {
     saw_text_deltas: bool,
     last_done_reason: Option<String>,
+    debug: bool,
 }
 
 impl PiParser {
-    pub fn new() -> Self {
+    pub fn new(debug: bool) -> Self {
         Self {
             saw_text_deltas: false,
             last_done_reason: None,
+            debug,
         }
     }
 
@@ -133,7 +135,13 @@ impl PiParser {
                     cached_tokens: None,
                 }]
             }
-            _ => vec![],
+            "start" | "toolcall_delta" => vec![],
+            other => {
+                if self.debug {
+                    eprintln!("debug: unknown pi message_update sub_type: {}", other);
+                }
+                vec![]
+            }
         }
     }
 }
@@ -171,7 +179,19 @@ impl EventParser for PiParser {
                 Ok(vec![AgentEvent::ToolResult { is_error, content }])
             }
             "auto_compaction_start" => Ok(vec![AgentEvent::Compaction]),
-            _ => Ok(vec![]), // silently ignore
+            "agent_start" | "agent_end"
+            | "turn_start" | "turn_end"
+            | "message_start" | "message_end"
+            | "tool_execution_start" | "tool_execution_update"
+            | "auto_compaction_end"
+            | "auto_retry_start" | "auto_retry_end"
+            | "extension_error" => Ok(vec![]),
+            other => {
+                if self.debug {
+                    eprintln!("debug: unknown pi event type: {}", other);
+                }
+                Ok(vec![])
+            }
         }
     }
 
@@ -191,7 +211,7 @@ mod tests {
 
     #[test]
     fn session_header() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"session","version":3,"id":"550e8400","timestamp":"2025-11-30T12:00:00.000Z","cwd":"/home/user/project"}"#);
         assert_eq!(events, vec![AgentEvent::SessionStart {
             session_id: "550e8400".into(),
@@ -202,14 +222,14 @@ mod tests {
 
     #[test]
     fn message_update_text_delta() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hello","contentIndex":0}}"#);
         assert_eq!(events, vec![AgentEvent::TextDelta("Hello".into())]);
     }
 
     #[test]
     fn message_update_text_end_with_prior_deltas() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         // First emit a delta to set saw_text_deltas
         parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hi","contentIndex":0}}"#);
         // text_end should be empty (duplicates suppressed)
@@ -219,7 +239,7 @@ mod tests {
 
     #[test]
     fn message_update_text_end_no_prior_deltas() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         // Reset via text_start
         parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}"#);
         // text_end with no deltas → TextComplete
@@ -229,7 +249,7 @@ mod tests {
 
     #[test]
     fn message_update_thinking() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let e1 = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}"#);
         assert_eq!(e1, vec![AgentEvent::ThinkingStart]);
 
@@ -242,14 +262,14 @@ mod tests {
 
     #[test]
     fn message_update_toolcall_start() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":1}}"#);
         assert_eq!(events, vec![AgentEvent::ToolStart { tool_name: String::new() }]);
     }
 
     #[test]
     fn message_update_toolcall_end() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","toolCall":{"name":"bash","arguments":{"command":"ls -la"}},"contentIndex":1}}"#);
         assert_eq!(events, vec![AgentEvent::ToolReady {
             tool_name: "bash".into(),
@@ -259,7 +279,7 @@ mod tests {
 
     #[test]
     fn tool_execution_end_success() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"tool_execution_end","toolCallId":"call-123","isError":false}"#);
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: false,
@@ -269,7 +289,7 @@ mod tests {
 
     #[test]
     fn tool_execution_end_error() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"tool_execution_end","toolCallId":"call-123","isError":true,"result":"permission denied"}"#);
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: true,
@@ -279,7 +299,7 @@ mod tests {
 
     #[test]
     fn message_update_done_stop() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"done","reason":"stop","message":{"role":"assistant","usage":{"inputTokens":1500,"outputTokens":800}}}}"#);
         match &events[0] {
             AgentEvent::SessionEnd { success, input_tokens, output_tokens, .. } => {
@@ -293,14 +313,14 @@ mod tests {
 
     #[test]
     fn message_update_done_tool_use_no_session_end() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"done","reason":"toolUse","message":{}}}"#);
         assert!(events.is_empty());
     }
 
     #[test]
     fn message_update_error() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"error","reason":"error","error":"something broke"}}"#);
         match &events[0] {
             AgentEvent::SessionEnd { success, error_type, error_message, .. } => {
@@ -314,14 +334,14 @@ mod tests {
 
     #[test]
     fn auto_compaction_start() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"auto_compaction_start"}"#);
         assert_eq!(events, vec![AgentEvent::Compaction]);
     }
 
     #[test]
     fn unknown_type_returns_empty() {
-        let mut p = PiParser::new();
+        let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"turn_start"}"#);
         assert!(events.is_empty());
     }
