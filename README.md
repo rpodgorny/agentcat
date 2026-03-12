@@ -54,12 +54,27 @@ The `NO_COLOR` environment variable is also respected.
 - Token usage, cost, and timing statistics
 - Error context and warnings
 
-## Building
+## Installation
 
-Requires Rust toolchain.
+### From crates.io
 
 ```bash
+cargo install agentcat
+```
+
+### From source
+
+```bash
+git clone https://github.com/rpodgorny/agentcat.git
+cd agentcat
 cargo build --release
+# binary is at target/release/agentcat
+```
+
+### Arch Linux (AUR)
+
+```bash
+yay -S agentcat-git
 ```
 
 ## Exit codes
