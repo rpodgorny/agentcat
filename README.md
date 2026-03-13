@@ -84,3 +84,15 @@ yay -S agentcat-git
 | 0 | Success |
 | 1 | Agent reported failure |
 | 2 | Parse error, empty stdin, or unrecognized format |
+
+## Similar projects
+
+All known similar tools are Claude Code specific:
+
+- [claude-stream-format](https://github.com/jemmyw/claude-stream-format) — Rust CLI for formatting Claude Code JSON streams
+- [claude-clean](https://github.com/ariel-frischer/claude-clean) — Go CLI with multiple output styles (boxed, compact, minimal, plain)
+- [format-claude-stream](https://github.com/Khan/format-claude-stream) — TypeScript CLI by Khan Academy, also usable as a library
+- [claude-stream-json-parser](https://github.com/shibuido/claude-stream-json-parser) — Rust library and CLI for parsing Claude Code stream-json output
+
+agentcat is the only tool we know of that supports multiple agent formats (Claude Code, pi.dev, Gemini CLI, Codex) under a single unified interface.
+
