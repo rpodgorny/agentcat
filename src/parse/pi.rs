@@ -5,6 +5,7 @@ use serde_json::Value;
 pub struct PiParser {
     saw_text_deltas: bool,
     last_done_reason: Option<String>,
+    model_emitted: bool,
     debug: bool,
 }
 
@@ -13,6 +14,7 @@ impl PiParser {
         Self {
             saw_text_deltas: false,
             last_done_reason: None,
+            model_emitted: false,
             debug,
         }
     }
@@ -76,16 +78,26 @@ impl PiParser {
                     .to_string();
                 self.last_done_reason = Some(reason.clone());
 
-                // Only emit SessionEnd on final "stop" reason
-                if reason == "stop" {
-                    let message = ame.get("message").unwrap_or(&Value::Null);
-                    let usage = message.get("usage");
-                    let _model = message
+                let message = ame.get("message").unwrap_or(&Value::Null);
+
+                let mut events = vec![];
+
+                // Emit model on first sighting
+                if !self.model_emitted {
+                    if let Some(model) = message
                         .get("model")
                         .and_then(|m| m.as_str())
-                        .map(|s| s.to_string());
+                    {
+                        self.model_emitted = true;
+                        events.push(AgentEvent::ModelDetected(model.to_string()));
+                    }
+                }
 
-                    vec![AgentEvent::SessionEnd {
+                // Only emit SessionEnd on final "stop" reason
+                if reason == "stop" {
+                    let usage = message.get("usage");
+
+                    events.push(AgentEvent::SessionEnd {
                         success: true,
                         error_type: None,
                         error_message: None,
@@ -100,10 +112,10 @@ impl PiParser {
                             .and_then(|u| u.get("outputTokens"))
                             .and_then(|t| t.as_u64()),
                         cached_tokens: None,
-                    }]
-                } else {
-                    vec![]
+                    });
                 }
+
+                events
             }
             "error" => {
                 let error_msg = ame
@@ -301,6 +313,8 @@ mod tests {
     fn message_update_done_stop() {
         let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"done","reason":"stop","message":{"role":"assistant","usage":{"inputTokens":1500,"outputTokens":800}}}}"#);
+        // No model in this message, so only SessionEnd
+        assert_eq!(events.len(), 1);
         match &events[0] {
             AgentEvent::SessionEnd { success, input_tokens, output_tokens, .. } => {
                 assert!(success);
@@ -337,6 +351,45 @@ mod tests {
         let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"auto_compaction_start"}"#);
         assert_eq!(events, vec![AgentEvent::Compaction]);
+    }
+
+    #[test]
+    fn message_update_done_tool_use_emits_model() {
+        let mut p = PiParser::new(false);
+        let events = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"done","reason":"toolUse","message":{"role":"assistant","model":"claude-sonnet-4-6-20250514"}}}"#);
+        assert_eq!(events, vec![AgentEvent::ModelDetected("claude-sonnet-4-6-20250514".into())]);
+    }
+
+    #[test]
+    fn message_update_done_stop_emits_model_and_session_end() {
+        let mut p = PiParser::new(false);
+        let events = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"done","reason":"stop","message":{"role":"assistant","model":"claude-sonnet-4-6-20250514","usage":{"inputTokens":100,"outputTokens":50}}}}"#);
+        assert_eq!(events, vec![
+            AgentEvent::ModelDetected("claude-sonnet-4-6-20250514".into()),
+            AgentEvent::SessionEnd {
+                success: true,
+                error_type: None,
+                error_message: None,
+                num_turns: None,
+                duration_ms: None,
+                api_duration_ms: None,
+                cost_usd: None,
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                cached_tokens: None,
+            },
+        ]);
+    }
+
+    #[test]
+    fn message_update_done_model_emitted_only_once() {
+        let mut p = PiParser::new(false);
+        // First done emits model
+        let e1 = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"done","reason":"toolUse","message":{"model":"claude-sonnet-4-6-20250514"}}}"#);
+        assert_eq!(e1, vec![AgentEvent::ModelDetected("claude-sonnet-4-6-20250514".into())]);
+        // Second done should not emit model again
+        let e2 = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"done","reason":"toolUse","message":{"model":"claude-sonnet-4-6-20250514"}}}"#);
+        assert!(e2.is_empty());
     }
 
     #[test]

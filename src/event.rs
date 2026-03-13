@@ -46,6 +46,7 @@ pub enum AgentEvent {
         is_error: bool,
         content: String,
     },
+    ModelDetected(String),
     Compaction,
     UserMessage(String),
     SubAgentMessage(String),

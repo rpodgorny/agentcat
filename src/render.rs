@@ -102,6 +102,14 @@ impl Renderer {
                 );
                 self.style.write_bold_cyan(&mut w, &line)?;
             }
+            AgentEvent::ModelDetected(model) => {
+                let line = format!(
+                    "{} Model: {}\n",
+                    self.style.icon_session(),
+                    model,
+                );
+                self.style.write_dim(&mut w, &line)?;
+            }
             AgentEvent::TextDelta(text) => {
                 self.needs_newline_before_tool = true;
                 write!(w, "{}", text)?;

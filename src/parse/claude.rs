@@ -12,6 +12,7 @@ enum BlockState {
 pub struct ClaudeParser {
     block_state: BlockState,
     saw_stream_events: bool,
+    model_emitted: bool,
     debug: bool,
 }
 
@@ -20,6 +21,7 @@ impl ClaudeParser {
         Self {
             block_state: BlockState::None,
             saw_stream_events: false,
+            model_emitted: false,
             debug,
         }
     }
@@ -117,7 +119,20 @@ impl ClaudeParser {
                     _ => vec![],
                 }
             }
-            "message_start" | "message_delta" | "message_stop" | "ping" | "error" => vec![],
+            "message_start" => {
+                if !self.model_emitted {
+                    if let Some(model) = event
+                        .get("message")
+                        .and_then(|m| m.get("model"))
+                        .and_then(|m| m.as_str())
+                    {
+                        self.model_emitted = true;
+                        return vec![AgentEvent::ModelDetected(model.to_string())];
+                    }
+                }
+                vec![]
+            }
+            "message_delta" | "message_stop" | "ping" | "error" => vec![],
             other => {
                 if self.debug {
                     eprintln!("debug: unknown claude stream event type: {}", other);
@@ -135,6 +150,19 @@ impl ClaudeParser {
         }
 
         let mut events = vec![];
+
+        // Extract model from non-streaming assistant message
+        if !self.model_emitted {
+            if let Some(model) = v
+                .get("message")
+                .and_then(|m| m.get("model"))
+                .and_then(|m| m.as_str())
+            {
+                self.model_emitted = true;
+                events.push(AgentEvent::ModelDetected(model.to_string()));
+            }
+        }
+
         let content = match v
             .get("message")
             .and_then(|m| m.get("content"))
@@ -575,6 +603,45 @@ mod tests {
         let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"user","parent_tool_use_id":"toolu_xyz","content":"Search for files"}"#);
         assert_eq!(events, vec![AgentEvent::SubAgentMessage("Search for files".into())]);
+    }
+
+    #[test]
+    fn stream_event_message_start_emits_model() {
+        let mut p = ClaudeParser::new(false);
+        let events = parse(&mut p, r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_01abc","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}}"#);
+        assert_eq!(events, vec![AgentEvent::ModelDetected("claude-sonnet-4-6-20250514".into())]);
+    }
+
+    #[test]
+    fn stream_event_message_start_model_emitted_only_once() {
+        let mut p = ClaudeParser::new(false);
+        let e1 = parse(&mut p, r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-sonnet-4-6-20250514"}}}"#);
+        assert_eq!(e1, vec![AgentEvent::ModelDetected("claude-sonnet-4-6-20250514".into())]);
+        // Second message_start should not emit again
+        let e2 = parse(&mut p, r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-sonnet-4-6-20250514"}}}"#);
+        assert!(e2.is_empty());
+    }
+
+    #[test]
+    fn assistant_message_emits_model_when_no_stream() {
+        let mut p = ClaudeParser::new(false);
+        let events = parse(&mut p, r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-6","content":[{"type":"text","text":"Hello"}]}}"#);
+        assert_eq!(events, vec![
+            AgentEvent::ModelDetected("claude-opus-4-6".into()),
+            AgentEvent::TextComplete("Hello".into()),
+        ]);
+    }
+
+    #[test]
+    fn assistant_message_no_model_after_stream_model() {
+        let mut p = ClaudeParser::new(false);
+        // Model already emitted via stream_event
+        parse(&mut p, r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-sonnet-4-6-20250514"}}}"#);
+        // stream text
+        parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}}"#);
+        // assistant message (suppressed because saw_stream_events)
+        let events = parse(&mut p, r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-6-20250514","content":[{"type":"text","text":"Hi"}]}}"#);
+        assert!(events.is_empty());
     }
 
     #[test]

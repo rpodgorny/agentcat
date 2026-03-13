@@ -2,7 +2,7 @@
 pkgname=agentcat-git
 provides=('agentcat')
 conflicts=('agentcat')
-pkgver=r5.408fdc3
+pkgver=r11.cb9b82e
 pkgrel=1
 pkgdesc="Universal stream formatter for AI coding agent output"
 arch=('x86_64')

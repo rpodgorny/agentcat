@@ -65,6 +65,15 @@ pub fn tool_summary(tool_name: &str, input: &serde_json::Value) -> String {
                 format!("\"{}\"", pattern)
             }
         }
+        "agent" => {
+            let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let model = input.get("model").and_then(|v| v.as_str());
+            if let Some(m) = model {
+                format!("{} ({})", truncate(desc, 60), m)
+            } else {
+                truncate(desc, 60)
+            }
+        }
         "websearch" | "web_search" => extract_field(input, "query", tool_name),
         "webfetch" => extract_field(input, "url", tool_name),
         "filechange" | "file_change" => {
@@ -244,6 +253,27 @@ mod tests {
         let result = tool_summary("my-server/search", &input);
         // Should be the first 60 chars of the JSON string (or less)
         assert!(result.contains("query"));
+    }
+
+    #[test]
+    fn tool_summary_agent_with_model() {
+        let input = serde_json::json!({"description": "Search for 500-word joke", "model": "haiku"});
+        assert_eq!(tool_summary("Agent", &input), "Search for 500-word joke (haiku)");
+    }
+
+    #[test]
+    fn tool_summary_agent_without_model() {
+        let input = serde_json::json!({"description": "Search for files"});
+        assert_eq!(tool_summary("Agent", &input), "Search for files");
+    }
+
+    #[test]
+    fn tool_summary_agent_long_description() {
+        let long_desc = "a".repeat(80);
+        let input = serde_json::json!({"description": long_desc, "model": "opus"});
+        let result = tool_summary("Agent", &input);
+        assert!(result.ends_with("... (opus)"));
+        assert!(result.len() < 80);
     }
 
     #[test]
