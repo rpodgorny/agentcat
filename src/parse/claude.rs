@@ -14,6 +14,19 @@ pub struct ClaudeParser {
     saw_stream_events: bool,
     model_emitted: bool,
     debug: bool,
+    // Claude Code emits the final response text in up to three places:
+    //   1. stream_event text deltas (real-time streaming)
+    //   2. assistant message content[].text (complete message)
+    //   3. result event "result" field (session summary)
+    //
+    // Without deduplication the same text would appear multiple times.
+    // We track the last emitted text so we can suppress duplicates from
+    // the result event while still showing it when it's the only source
+    // (e.g. error results, unusual session types).
+    //
+    // The existing `saw_stream_events` flag handles the stream→assistant
+    // dedup. This `last_text` field handles the assistant/stream→result dedup.
+    last_text: String,
 }
 
 impl ClaudeParser {
@@ -23,6 +36,7 @@ impl ClaudeParser {
             saw_stream_events: false,
             model_emitted: false,
             debug,
+            last_text: String::new(),
         }
     }
 
@@ -40,6 +54,7 @@ impl ClaudeParser {
                 match block_type {
                     "text" => {
                         self.block_state = BlockState::Text;
+                        self.last_text.clear();
                         vec![]
                     }
                     "thinking" => {
@@ -75,6 +90,7 @@ impl ClaudeParser {
                 match delta_type {
                     "text_delta" => {
                         let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                        self.last_text.push_str(text);
                         vec![AgentEvent::TextDelta(text.to_string())]
                     }
                     "thinking_delta" => {
@@ -177,6 +193,7 @@ impl ClaudeParser {
             match block_type {
                 "text" => {
                     let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    self.last_text = text.to_string();
                     events.push(AgentEvent::TextComplete(text.to_string()));
                 }
                 "tool_use" => {
@@ -293,7 +310,23 @@ impl ClaudeParser {
         events
     }
 
-    fn parse_result(&self, v: &Value) -> Vec<AgentEvent> {
+    fn parse_result(&mut self, v: &Value) -> Vec<AgentEvent> {
+        let mut events = vec![];
+
+        // Claude Code's result event may contain a "result" field with the final
+        // response text. This is typically a duplicate of what was already emitted
+        // via stream_event deltas or the assistant message. We suppress it when
+        // it matches last_text to avoid showing the same content twice (a known
+        // Claude Code quirk). When it differs or no prior text was emitted, we
+        // show it — this covers error messages and edge cases where the result
+        // is the only source of the final text.
+        if let Some(result_text) = v.get("result").and_then(|r| r.as_str()) {
+            if !result_text.is_empty() && result_text != self.last_text {
+                events.push(AgentEvent::TextComplete(result_text.to_string()));
+            }
+        }
+        self.last_text.clear();
+
         let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
         let success = subtype == "success";
         let is_error = v
@@ -308,7 +341,7 @@ impl ClaudeParser {
         };
 
         let usage = v.get("usage");
-        vec![AgentEvent::SessionEnd {
+        events.push(AgentEvent::SessionEnd {
             success: !is_error,
             error_type,
             error_message: None,
@@ -321,7 +354,8 @@ impl ClaudeParser {
             cached_tokens: usage
                 .and_then(|u| u.get("cache_read_input_tokens"))
                 .and_then(|t| t.as_u64()),
-        }]
+        });
+        events
     }
 }
 
@@ -642,6 +676,40 @@ mod tests {
         // assistant message (suppressed because saw_stream_events)
         let events = parse(&mut p, r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-6-20250514","content":[{"type":"text","text":"Hi"}]}}"#);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn result_text_suppressed_after_stream_events() {
+        let mut p = ClaudeParser::new(false);
+        // Stream text deltas
+        parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}"#);
+        parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello world"}}}"#);
+        parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#);
+        // Result with same text should NOT emit TextComplete
+        let events = parse(&mut p, r#"{"type":"result","subtype":"success","result":"Hello world","total_cost_usd":0.01}"#);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::SessionEnd { success: true, .. }));
+    }
+
+    #[test]
+    fn result_text_suppressed_after_assistant() {
+        let mut p = ClaudeParser::new(false);
+        // Non-streaming assistant message
+        parse(&mut p, r#"{"type":"assistant","message":{"content":[{"type":"text","text":"The answer is 42"}]}}"#);
+        // Result with same text should NOT emit TextComplete
+        let events = parse(&mut p, r#"{"type":"result","subtype":"success","result":"The answer is 42","total_cost_usd":0.01}"#);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::SessionEnd { success: true, .. }));
+    }
+
+    #[test]
+    fn result_text_emitted_when_no_prior_text() {
+        let mut p = ClaudeParser::new(false);
+        // No prior streaming or assistant text — result text should be emitted
+        let events = parse(&mut p, r#"{"type":"result","subtype":"success","result":"Only in result","total_cost_usd":0.01}"#);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], AgentEvent::TextComplete("Only in result".into()));
+        assert!(matches!(&events[1], AgentEvent::SessionEnd { success: true, .. }));
     }
 
     #[test]
