@@ -60,21 +60,25 @@ impl EventParser for GeminiParser {
                     .and_then(|n| n.as_str())
                     .unwrap_or("unknown")
                     .to_string();
+                let id = v.get("tool_id").and_then(|i| i.as_str()).map(|s| s.to_string());
                 let params = v.get("parameters").unwrap_or(&Value::Null);
                 let summary = tool_summary(&tool_name, params);
                 Ok(vec![
                     AgentEvent::ToolStart {
                         tool_name: tool_name.clone(),
+                        id: id.clone(),
                     },
                     AgentEvent::ToolReady {
                         tool_name,
                         input_summary: summary,
+                        id,
                     },
                 ])
             }
             "tool_result" => {
                 let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
                 let is_error = status == "error";
+                let id = v.get("tool_id").and_then(|i| i.as_str()).map(|s| s.to_string());
                 let content = if is_error {
                     v.get("error")
                         .and_then(|e| e.get("message"))
@@ -87,7 +91,7 @@ impl EventParser for GeminiParser {
                         .unwrap_or("")
                         .to_string()
                 };
-                Ok(vec![AgentEvent::ToolResult { is_error, content }])
+                Ok(vec![AgentEvent::ToolResult { is_error, content, id }])
             }
             "error" => {
                 let message = v
@@ -207,10 +211,11 @@ mod tests {
         let mut p = GeminiParser::new(false);
         let events = parse(&mut p, r#"{"type":"tool_use","tool_name":"Read","tool_id":"read-123","parameters":{"file_path":"/path/to/file.txt"}}"#);
         assert_eq!(events, vec![
-            AgentEvent::ToolStart { tool_name: "Read".into() },
+            AgentEvent::ToolStart { tool_name: "Read".into(), id: Some("read-123".into()) },
             AgentEvent::ToolReady {
                 tool_name: "Read".into(),
                 input_summary: "/path/to/file.txt".into(),
+                id: Some("read-123".into()),
             },
         ]);
     }
@@ -222,6 +227,7 @@ mod tests {
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: false,
             content: "file contents here".into(),
+            id: Some("read-123".into()),
         }]);
     }
 
@@ -232,6 +238,7 @@ mod tests {
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: true,
             content: "File not found".into(),
+            id: Some("read-123".into()),
         }]);
     }
 

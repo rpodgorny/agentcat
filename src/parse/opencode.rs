@@ -89,10 +89,12 @@ impl EventParser for OpenCodeParser {
                         Ok(vec![
                             AgentEvent::ToolStart {
                                 tool_name: tool_name.clone(),
+                                id: None,
                             },
                             AgentEvent::ToolReady {
                                 tool_name,
                                 input_summary: summary,
+                                id: None,
                             },
                         ])
                     }
@@ -105,6 +107,7 @@ impl EventParser for OpenCodeParser {
                         Ok(vec![AgentEvent::ToolResult {
                             is_error: false,
                             content: output,
+                            id: None,
                         }])
                     }
                     "error" => {
@@ -116,6 +119,7 @@ impl EventParser for OpenCodeParser {
                         Ok(vec![AgentEvent::ToolResult {
                             is_error: true,
                             content: output,
+                            id: None,
                         }])
                     }
                     other => {
@@ -293,13 +297,15 @@ mod tests {
         assert_eq!(
             events[0],
             AgentEvent::ToolStart {
-                tool_name: "Bash".into()
+                tool_name: "Bash".into(),
+                id: None,
             }
         );
         match &events[1] {
             AgentEvent::ToolReady {
                 tool_name,
                 input_summary,
+                ..
             } => {
                 assert_eq!(tool_name, "Bash");
                 assert!(input_summary.contains("ls -la"));
@@ -320,6 +326,7 @@ mod tests {
             vec![AgentEvent::ToolResult {
                 is_error: false,
                 content: "file1.txt\nfile2.txt".into(),
+                id: None,
             }]
         );
     }
@@ -336,6 +343,7 @@ mod tests {
             vec![AgentEvent::ToolResult {
                 is_error: true,
                 content: "command not found".into(),
+                id: None,
             }]
         );
     }

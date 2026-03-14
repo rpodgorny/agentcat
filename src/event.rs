@@ -39,14 +39,17 @@ pub enum AgentEvent {
     ThinkingEnd,
     ToolStart {
         tool_name: String,
+        id: Option<String>,
     },
     ToolReady {
         tool_name: String,
         input_summary: String,
+        id: Option<String>,
     },
     ToolResult {
         is_error: bool,
         content: String,
+        id: Option<String>,
     },
     ModelDetected(String),
     Compaction,

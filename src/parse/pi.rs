@@ -52,8 +52,11 @@ impl PiParser {
             }
             "thinking_end" => vec![AgentEvent::ThinkingEnd],
             "toolcall_start" => {
+                let tc = ame.get("toolCall").unwrap_or(&Value::Null);
+                let id = tc.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
                 vec![AgentEvent::ToolStart {
                     tool_name: String::new(),
+                    id,
                 }]
             }
             "toolcall_end" => {
@@ -63,11 +66,13 @@ impl PiParser {
                     .and_then(|n| n.as_str())
                     .unwrap_or("unknown")
                     .to_string();
+                let id = tc.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
                 let args = tc.get("arguments").unwrap_or(&Value::Null);
                 let summary = tool_summary(&name, args);
                 vec![AgentEvent::ToolReady {
                     tool_name: name,
                     input_summary: summary,
+                    id,
                 }]
             }
             "done" => {
@@ -182,13 +187,14 @@ impl EventParser for PiParser {
                     .get("isError")
                     .and_then(|e| e.as_bool())
                     .unwrap_or(false);
+                let id = v.get("toolCallId").and_then(|i| i.as_str()).map(|s| s.to_string());
                 // pi.dev tool_execution_end doesn't always have result content in the event
                 let content = v
                     .get("result")
                     .and_then(|r| r.as_str())
                     .unwrap_or("")
                     .to_string();
-                Ok(vec![AgentEvent::ToolResult { is_error, content }])
+                Ok(vec![AgentEvent::ToolResult { is_error, content, id }])
             }
             "auto_compaction_start" => Ok(vec![AgentEvent::Compaction]),
             "agent_start" | "agent_end"
@@ -276,7 +282,7 @@ mod tests {
     fn message_update_toolcall_start() {
         let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":1}}"#);
-        assert_eq!(events, vec![AgentEvent::ToolStart { tool_name: String::new() }]);
+        assert_eq!(events, vec![AgentEvent::ToolStart { tool_name: String::new(), id: None }]);
     }
 
     #[test]
@@ -286,6 +292,7 @@ mod tests {
         assert_eq!(events, vec![AgentEvent::ToolReady {
             tool_name: "bash".into(),
             input_summary: "ls -la".into(),
+            id: None,
         }]);
     }
 
@@ -296,6 +303,7 @@ mod tests {
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: false,
             content: String::new(),
+            id: Some("call-123".into()),
         }]);
     }
 
@@ -306,6 +314,7 @@ mod tests {
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: true,
             content: "permission denied".into(),
+            id: Some("call-123".into()),
         }]);
     }
 

@@ -27,6 +27,7 @@ impl CodexParser {
 
     fn parse_item_started(&self, item: &Value) -> Vec<AgentEvent> {
         let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let id = item.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
         match item_type {
             "command_execution" => {
                 let command = item
@@ -39,16 +40,19 @@ impl CodexParser {
                 vec![
                     AgentEvent::ToolStart {
                         tool_name: "Bash".to_string(),
+                        id: id.clone(),
                     },
                     AgentEvent::ToolReady {
                         tool_name: "Bash".to_string(),
                         input_summary: summary,
+                        id,
                     },
                 ]
             }
             "reasoning" => vec![AgentEvent::ThinkingStart],
             "file_change" => vec![AgentEvent::ToolStart {
                 tool_name: "FileChange".to_string(),
+                id,
             }],
             "mcp_tool_call" => {
                 let server = item
@@ -60,7 +64,7 @@ impl CodexParser {
                     .and_then(|t| t.as_str())
                     .unwrap_or("unknown");
                 let name = format!("{}/{}", server, tool);
-                vec![AgentEvent::ToolStart { tool_name: name }]
+                vec![AgentEvent::ToolStart { tool_name: name, id }]
             }
             "agent_message" | "web_search" | "context_compaction"
             | "collab_tool_call" | "todo_list" | "error" => vec![],
@@ -75,6 +79,7 @@ impl CodexParser {
 
     fn parse_item_completed(&self, item: &Value) -> Vec<AgentEvent> {
         let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let id = item.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
         match item_type {
             "command_execution" => {
                 let exit_code = item
@@ -92,7 +97,7 @@ impl CodexParser {
                 } else {
                     output
                 };
-                vec![AgentEvent::ToolResult { is_error, content }]
+                vec![AgentEvent::ToolResult { is_error, content, id }]
             }
             "agent_message" => {
                 let text = item
@@ -121,6 +126,7 @@ impl CodexParser {
                 events.push(AgentEvent::ToolReady {
                     tool_name: "FileChange".to_string(),
                     input_summary: summary,
+                    id: id.clone(),
                 });
                 let status = item
                     .get("status")
@@ -130,6 +136,7 @@ impl CodexParser {
                 events.push(AgentEvent::ToolResult {
                     is_error,
                     content: String::new(),
+                    id,
                 });
                 events
             }
@@ -159,10 +166,12 @@ impl CodexParser {
                     AgentEvent::ToolReady {
                         tool_name: name,
                         input_summary: summary,
+                        id: id.clone(),
                     },
                     AgentEvent::ToolResult {
                         is_error,
                         content: result,
+                        id,
                     },
                 ]
             }
@@ -175,14 +184,17 @@ impl CodexParser {
                 vec![
                     AgentEvent::ToolStart {
                         tool_name: "WebSearch".to_string(),
+                        id: id.clone(),
                     },
                     AgentEvent::ToolReady {
                         tool_name: "WebSearch".to_string(),
                         input_summary: query,
+                        id: id.clone(),
                     },
                     AgentEvent::ToolResult {
                         is_error: false,
                         content: String::new(),
+                        id,
                     },
                 ]
             }
@@ -331,9 +343,9 @@ mod tests {
         let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"bash -lc ls","cwd":"/project","status":"in_progress"}}"#);
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0], AgentEvent::ToolStart { tool_name: "Bash".into() });
+        assert_eq!(events[0], AgentEvent::ToolStart { tool_name: "Bash".into(), id: Some("item_1".into()) });
         match &events[1] {
-            AgentEvent::ToolReady { tool_name, input_summary } => {
+            AgentEvent::ToolReady { tool_name, input_summary, .. } => {
                 assert_eq!(tool_name, "Bash");
                 assert!(input_summary.contains("bash -lc ls"));
             }
@@ -348,6 +360,7 @@ mod tests {
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: false,
             content: "docs\nsdk\n".into(),
+            id: Some("item_1".into()),
         }]);
     }
 
@@ -357,7 +370,7 @@ mod tests {
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc bad","status":"completed","exitCode":1,"aggregatedOutput":"error: not found\ndetails"}}"#);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            AgentEvent::ToolResult { is_error, content } => {
+            AgentEvent::ToolResult { is_error, content, .. } => {
                 assert!(is_error);
                 assert!(content.starts_with("exit 1:"));
             }
@@ -393,7 +406,7 @@ mod tests {
     fn item_started_file_change() {
         let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.started","item":{"id":"item_2","type":"file_change"}}"#);
-        assert_eq!(events, vec![AgentEvent::ToolStart { tool_name: "FileChange".into() }]);
+        assert_eq!(events, vec![AgentEvent::ToolStart { tool_name: "FileChange".into(), id: Some("item_2".into()) }]);
     }
 
     #[test]
@@ -402,13 +415,13 @@ mod tests {
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_2","type":"file_change","status":"completed","changes":[{"path":"src/main.rs","kind":"edit","diff":"..."}]}}"#);
         assert_eq!(events.len(), 2);
         match &events[0] {
-            AgentEvent::ToolReady { tool_name, input_summary } => {
+            AgentEvent::ToolReady { tool_name, input_summary, .. } => {
                 assert_eq!(tool_name, "FileChange");
                 assert!(input_summary.contains("src/main.rs"));
             }
             other => panic!("expected ToolReady, got {:?}", other),
         }
-        assert_eq!(events[1], AgentEvent::ToolResult { is_error: false, content: String::new() });
+        assert_eq!(events[1], AgentEvent::ToolResult { is_error: false, content: String::new(), id: Some("item_2".into()) });
     }
 
     #[test]
@@ -422,7 +435,7 @@ mod tests {
             }
             other => panic!("expected ToolReady, got {:?}", other),
         }
-        assert_eq!(events[1], AgentEvent::ToolResult { is_error: false, content: "Search results...".into() });
+        assert_eq!(events[1], AgentEvent::ToolResult { is_error: false, content: "Search results...".into(), id: Some("item_5".into()) });
     }
 
     #[test]
@@ -430,9 +443,9 @@ mod tests {
         let mut p = CodexParser::new(false);
         let events = parse(&mut p, r#"{"type":"item.completed","item":{"id":"item_6","type":"web_search","query":"rust async stdin","action":"search"}}"#);
         assert_eq!(events, vec![
-            AgentEvent::ToolStart { tool_name: "WebSearch".into() },
-            AgentEvent::ToolReady { tool_name: "WebSearch".into(), input_summary: "rust async stdin".into() },
-            AgentEvent::ToolResult { is_error: false, content: String::new() },
+            AgentEvent::ToolStart { tool_name: "WebSearch".into(), id: Some("item_6".into()) },
+            AgentEvent::ToolReady { tool_name: "WebSearch".into(), input_summary: "rust async stdin".into(), id: Some("item_6".into()) },
+            AgentEvent::ToolResult { is_error: false, content: String::new(), id: Some("item_6".into()) },
         ]);
     }
 

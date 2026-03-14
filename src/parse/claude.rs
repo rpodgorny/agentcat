@@ -5,7 +5,7 @@ use serde_json::Value;
 enum BlockState {
     None,
     Text,
-    ToolUse { name: String, json_buf: String },
+    ToolUse { name: String, json_buf: String, id: Option<String> },
     Thinking,
 }
 
@@ -67,12 +67,15 @@ impl ClaudeParser {
                             .and_then(|n| n.as_str())
                             .unwrap_or("unknown")
                             .to_string();
+                        let id = cb.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
                         let events = vec![AgentEvent::ToolStart {
                             tool_name: name.clone(),
+                            id: id.clone(),
                         }];
                         self.block_state = BlockState::ToolUse {
                             name,
                             json_buf: String::new(),
+                            id,
                         };
                         events
                     }
@@ -123,13 +126,14 @@ impl ClaudeParser {
                 let old_state = std::mem::replace(&mut self.block_state, BlockState::None);
                 match old_state {
                     BlockState::Thinking => vec![AgentEvent::ThinkingEnd],
-                    BlockState::ToolUse { name, json_buf } => {
+                    BlockState::ToolUse { name, json_buf, id } => {
                         let input: Value =
                             serde_json::from_str(&json_buf).unwrap_or(Value::Null);
                         let summary = tool_summary(&name, &input);
                         vec![AgentEvent::ToolReady {
                             tool_name: name,
                             input_summary: summary,
+                            id,
                         }]
                     }
                     _ => vec![],
@@ -202,14 +206,17 @@ impl ClaudeParser {
                         .and_then(|n| n.as_str())
                         .unwrap_or("unknown")
                         .to_string();
+                    let id = block.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
                     let input = block.get("input").unwrap_or(&Value::Null);
                     let summary = tool_summary(&name, input);
                     events.push(AgentEvent::ToolStart {
                         tool_name: name.clone(),
+                        id: id.clone(),
                     });
                     events.push(AgentEvent::ToolReady {
                         tool_name: name,
                         input_summary: summary,
+                        id,
                     });
                 }
                 "thinking" => {
@@ -273,6 +280,7 @@ impl ClaudeParser {
                         .get("is_error")
                         .and_then(|e| e.as_bool())
                         .unwrap_or(false);
+                    let id = block.get("tool_use_id").and_then(|i| i.as_str()).map(|s| s.to_string());
                     let content_val = block.get("content");
                     let content_str = match content_val {
                         Some(Value::String(s)) => s.clone(),
@@ -286,6 +294,7 @@ impl ClaudeParser {
                     events.push(AgentEvent::ToolResult {
                         is_error,
                         content: content_str,
+                        id,
                     });
                 }
                 "text" => {
@@ -453,7 +462,7 @@ mod tests {
 
         // content_block_start tool_use
         let e1 = parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_abc","name":"Bash"}}}"#);
-        assert_eq!(e1, vec![AgentEvent::ToolStart { tool_name: "Bash".into() }]);
+        assert_eq!(e1, vec![AgentEvent::ToolStart { tool_name: "Bash".into(), id: Some("toolu_abc".into()) }]);
 
         // input_json_delta #1
         let e2 = parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\": \"ls"}}}"#);
@@ -467,7 +476,7 @@ mod tests {
         let e4 = parse(&mut p, r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#);
         assert_eq!(e4.len(), 1);
         match &e4[0] {
-            AgentEvent::ToolReady { tool_name, input_summary } => {
+            AgentEvent::ToolReady { tool_name, input_summary, .. } => {
                 assert_eq!(tool_name, "Bash");
                 assert_eq!(input_summary, "ls -la");
             }
@@ -495,8 +504,8 @@ mod tests {
         let events = parse(&mut p, r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}},{"type":"thinking","thinking":"hmm"}]}}"#);
         assert_eq!(events, vec![
             AgentEvent::TextComplete("Hello".into()),
-            AgentEvent::ToolStart { tool_name: "Bash".into() },
-            AgentEvent::ToolReady { tool_name: "Bash".into(), input_summary: "ls".into() },
+            AgentEvent::ToolStart { tool_name: "Bash".into(), id: Some("t1".into()) },
+            AgentEvent::ToolReady { tool_name: "Bash".into(), input_summary: "ls".into(), id: Some("t1".into()) },
             AgentEvent::ThinkingStart,
             AgentEvent::ThinkingDelta("hmm".into()),
             AgentEvent::ThinkingEnd,
@@ -520,6 +529,7 @@ mod tests {
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: false,
             content: "file1.rs\nfile2.rs".into(),
+            id: Some("toolu_abc".into()),
         }]);
     }
 
@@ -530,6 +540,7 @@ mod tests {
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: true,
             content: "permission denied".into(),
+            id: Some("toolu_abc".into()),
         }]);
     }
 
@@ -540,6 +551,7 @@ mod tests {
         assert_eq!(events, vec![AgentEvent::ToolResult {
             is_error: false,
             content: "hello_world".into(),
+            id: Some("toolu_abc".into()),
         }]);
     }
 
@@ -555,7 +567,7 @@ mod tests {
         let mut p = ClaudeParser::new(false);
         let events = parse(&mut p, r#"{"type":"user","content":[{"type":"text","text":"Here is context"},{"type":"tool_result","tool_use_id":"t1","content":"output","is_error":false}]}"#);
         assert_eq!(events, vec![
-            AgentEvent::ToolResult { is_error: false, content: "output".into() },
+            AgentEvent::ToolResult { is_error: false, content: "output".into(), id: Some("t1".into()) },
             AgentEvent::UserMessage("Here is context".into()),
         ]);
     }

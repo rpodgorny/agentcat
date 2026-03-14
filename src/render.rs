@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::time::Instant;
 
 struct ToolSlot {
+    id: Option<String>,
     start_time: Instant,
     spinner_frame: usize,
     completed: bool,
@@ -156,6 +157,7 @@ impl Renderer {
             AgentEvent::ToolReady {
                 tool_name,
                 input_summary,
+                id,
             } => {
                 // Write tool header
                 let line = format!(
@@ -174,14 +176,19 @@ impl Renderer {
                 }
 
                 self.tool_slots.push(ToolSlot {
+                    id,
                     start_time: Instant::now(),
                     spinner_frame: 1,
                     completed: false,
                 });
             }
-            AgentEvent::ToolResult { is_error, content } => {
-                // Find first non-completed slot (FIFO)
-                let slot_idx = self.tool_slots.iter().position(|s| !s.completed);
+            AgentEvent::ToolResult { is_error, content, id } => {
+                // ID-based matching with FIFO fallback
+                let slot_idx = match &id {
+                    Some(tid) => self.tool_slots.iter().position(|s| s.id.as_deref() == Some(tid))
+                        .or_else(|| self.tool_slots.iter().position(|s| !s.completed)),
+                    None => self.tool_slots.iter().position(|s| !s.completed),
+                };
 
                 let elapsed = slot_idx.map(|i| self.tool_slots[i].start_time.elapsed().as_secs_f64());
                 let elapsed_str = elapsed
