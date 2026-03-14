@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod opencode;
 pub mod pi;
 
 use crate::event::AgentEvent;
@@ -16,6 +17,7 @@ pub enum Format {
     Pi,
     Gemini,
     Codex,
+    OpenCode,
 }
 
 pub fn detect_format(first_line: &str) -> Result<Format, String> {
@@ -26,6 +28,7 @@ pub fn detect_format(first_line: &str) -> Result<Format, String> {
         Some("session") => Ok(Format::Pi),
         Some("init") => Ok(Format::Gemini),
         Some("thread.started") => Ok(Format::Codex),
+        Some("step_start") => Ok(Format::OpenCode),
         _ => Err("Error: unrecognized stream format".to_string()),
     }
 }
@@ -36,6 +39,7 @@ pub fn create_parser(format: Format, debug: bool) -> Box<dyn EventParser> {
         Format::Pi => Box::new(pi::PiParser::new(debug)),
         Format::Gemini => Box::new(gemini::GeminiParser::new(debug)),
         Format::Codex => Box::new(codex::CodexParser::new(debug)),
+        Format::OpenCode => Box::new(opencode::OpenCodeParser::new(debug)),
     }
 }
 
@@ -144,6 +148,12 @@ mod tests {
     fn detect_format_codex() {
         let line = r#"{"type":"thread.started","thread_id":"0199a213"}"#;
         assert_eq!(detect_format(line).unwrap(), Format::Codex);
+    }
+
+    #[test]
+    fn detect_format_opencode() {
+        let line = r#"{"type":"step_start","timestamp":1700000000,"sessionID":"ses_abc"}"#;
+        assert_eq!(detect_format(line).unwrap(), Format::OpenCode);
     }
 
     #[test]

@@ -26,7 +26,7 @@ struct Cli {
     #[arg(long)]
     no_color: bool,
 
-    /// Force input format: claude, pi, gemini, codex (default: auto-detect)
+    /// Force input format: claude, pi, gemini, codex, opencode (default: auto-detect)
     #[arg(long)]
     format: Option<String>,
 
@@ -50,6 +50,7 @@ async fn main() {
         "pi" => Format::Pi,
         "gemini" => Format::Gemini,
         "codex" => Format::Codex,
+        "opencode" => Format::OpenCode,
         other => {
             eprintln!("Error: unknown format '{}'", other);
             process::exit(2);
@@ -135,7 +136,9 @@ async fn main() {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Parse error: {}", e);
+                                if cli.debug {
+                                    eprintln!("Parse error: {}", e);
+                                }
                                 // Don't exit on single parse errors, continue
                             }
                         }

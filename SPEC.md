@@ -7,6 +7,7 @@ A CLI tool that reads NDJSON stream output from AI coding agents via stdin and r
 - **pi.dev** — `pi --mode json ...`
 - **Gemini CLI** — `gemini -o stream-json -p ...`
 - **Codex CLI** — `codex exec --json ...`
+- **OpenCode** — `opencode run --format json ...`
 
 **Usage:**
 ```bash
@@ -14,6 +15,7 @@ claude -p "prompt" --output-format stream-json --verbose --include-partial-messa
 pi --mode json "prompt" 2>/dev/null | agentcat
 gemini -o stream-json -p "prompt" | agentcat
 codex exec --json "prompt" | agentcat
+opencode run --format json "prompt" | agentcat
 ```
 
 **Language:** Async Rust
@@ -28,16 +30,17 @@ codex exec --json "prompt" | agentcat
 4. [Input Format: pi.dev](#input-format-pidev)
 5. [Input Format: Gemini CLI](#input-format-gemini-cli)
 6. [Input Format: Codex CLI](#input-format-codex-cli)
-7. [Internal Event Model](#internal-event-model)
-8. [Event Mapping Tables](#event-mapping-tables)
-9. [Output Rendering](#output-rendering)
-10. [Color Scheme](#color-scheme)
-11. [Architecture](#architecture)
-12. [Project Structure](#project-structure)
-13. [Exit Codes](#exit-codes)
-14. [Verification](#verification)
-15. [Future Extensibility](#future-extensibility)
-16. [Sources & References](#sources--references)
+7. [Input Format: OpenCode](#input-format-opencode)
+8. [Internal Event Model](#internal-event-model)
+9. [Event Mapping Tables](#event-mapping-tables)
+10. [Output Rendering](#output-rendering)
+11. [Color Scheme](#color-scheme)
+12. [Architecture](#architecture)
+13. [Project Structure](#project-structure)
+14. [Exit Codes](#exit-codes)
+15. [Verification](#verification)
+16. [Future Extensibility](#future-extensibility)
+17. [Sources & References](#sources--references)
 
 ---
 
@@ -50,7 +53,7 @@ Options:
   --show-thinking        Show extended thinking blocks (hidden by default)
   --no-emoji             Disable emoji output
   --no-color             Disable ANSI color output
-  --format <FORMAT>      Force input format: claude, pi, gemini, codex (default: auto-detect)
+  --format <FORMAT>      Force input format: claude, pi, gemini, codex, opencode (default: auto-detect)
   --version              Print version
   --help                 Print help
 ```
@@ -71,6 +74,7 @@ Auto-detect based on the first JSON line's `type` field:
 | `"session"` | pi.dev |
 | `"init"` | Gemini CLI |
 | `"thread.started"` | Codex CLI |
+| `"step_start"` | OpenCode |
 
 If detection fails, exit with code 2 and message to stderr: `"Error: unrecognized stream format"`.
 
@@ -828,9 +832,56 @@ turn.completed (with usage)
 
 ---
 
+## Input Format: OpenCode
+
+**Command:** `opencode run --format json "prompt" | agentcat`
+
+All events have the structure: `{"type":"<type>","timestamp":<ms>,"sessionID":"ses_xxx",...}`
+
+### Event Types
+
+| Event type | Key fields | Description |
+|---|---|---|
+| `step_start` | `part.sessionID` | Start of a new step; first occurrence triggers session start |
+| `text` | `part.text` | Complete text output from the model |
+| `reasoning` | `part.text` | Model reasoning/thinking block |
+| `tool_use` (state=`"running"`) | `part.name`, `part.input` | Tool invocation started |
+| `tool_use` (state=`"completed"`) | `part.output` | Tool completed successfully |
+| `tool_use` (state=`"error"`) | `part.output` | Tool completed with error |
+| `step_finish` | `part.tokens`, `part.cost` | Step completed with usage stats |
+| `error` | `error.data.message` | Error occurred |
+| `message.part.updated` | — | Ignored |
+| `session.status` | — | Ignored |
+| `session.error` | — | Ignored |
+
+### Token/Cost Structure in `step_finish`
+
+```json
+{
+  "type": "step_finish",
+  "part": {
+    "tokens": {
+      "input": 1000,
+      "output": 200,
+      "cache": { "read": 500 }
+    },
+    "cost": 0.05
+  }
+}
+```
+
+### Session Lifecycle
+
+OpenCode has no explicit session-start or session-end event. The parser:
+1. Emits `SessionStart` on the first `step_start` event only (subsequent ones are ignored)
+2. Accumulates tokens and cost from all `step_finish` events
+3. Emits `SessionEnd` from `finish()` at EOF with accumulated stats
+
+---
+
 ## Internal Event Model
 
-All four formats are parsed into a common internal event stream. The renderer only sees `AgentEvent` values — it is completely format-agnostic.
+All five formats are parsed into a common internal event stream. The renderer only sees `AgentEvent` values — it is completely format-agnostic.
 
 ```rust
 /// Events emitted by all parsers, consumed by the renderer.
@@ -981,6 +1032,23 @@ enum AgentKind {
 
 **Important:** Codex has no explicit "session end" event. The parser must accumulate token usage from all `turn.completed` events and emit `SessionEnd` from the `finish()` method called at EOF.
 
+### OpenCode → AgentEvent
+
+| OpenCode event | AgentEvent |
+|-------------|------------|
+| `step_start` (first only) | `SessionStart { session_id: part.sessionID, agent: OpenCode, model: None }` |
+| `step_start` (subsequent) | (ignored) |
+| `text` | `TextComplete(part.text)` |
+| `reasoning` | `ThinkingStart` + `ThinkingDelta(part.text)` + `ThinkingEnd` |
+| `tool_use` (state=`"running"`) | `ToolStart { name }` + `ToolReady { name, summary }` |
+| `tool_use` (state=`"completed"`) | `ToolResult { is_error: false, output }` |
+| `tool_use` (state=`"error"`) | `ToolResult { is_error: true, output }` |
+| `step_finish` | (accumulate tokens and cost internally) |
+| `error` | (set error flag + message internally) |
+| (EOF) | `SessionEnd { success, cost_usd, input_tokens, output_tokens, cached_tokens }` (accumulated) |
+
+**Important:** Like Codex, OpenCode has no explicit session-end event. The parser accumulates token usage and cost from all `step_finish` events and emits `SessionEnd` from `finish()` at EOF.
+
 ---
 
 ## Output Rendering
@@ -992,6 +1060,7 @@ enum AgentKind {
 🐱 agentcat — session 550e8400-... (pi)
 🐱 agentcat — session test-123 (gemini, gemini-2.5-pro)
 🐱 agentcat — session 0199a213-... (codex)
+🐱 agentcat — session ses_abc-... (opencode)
 ```
 
 Show model name when available. Truncate long session IDs for readability.
@@ -1302,7 +1371,8 @@ agentcat/
 │   │   ├── claude.rs      # ClaudeParser — Claude Code stream-json
 │   │   ├── pi.rs          # PiParser — pi.dev JSON mode
 │   │   ├── gemini.rs      # GeminiParser — Gemini CLI stream-json
-│   │   └── codex.rs       # CodexParser — Codex CLI --json
+│   │   ├── codex.rs       # CodexParser — Codex CLI --json
+│   │   └── opencode.rs    # OpenCodeParser — OpenCode JSON format
 │   ├── render.rs          # Renderer: AgentEvent → styled terminal output
 │   └── style.rs           # Color/style helpers, emoji mappings, NO_COLOR support
 ```

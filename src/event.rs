@@ -7,6 +7,7 @@ pub enum AgentKind {
     Pi,
     Gemini,
     Codex,
+    OpenCode,
     Unknown,
 }
 
@@ -17,6 +18,7 @@ impl fmt::Display for AgentKind {
             AgentKind::Pi => write!(f, "pi"),
             AgentKind::Gemini => write!(f, "gemini"),
             AgentKind::Codex => write!(f, "codex"),
+            AgentKind::OpenCode => write!(f, "opencode"),
             AgentKind::Unknown => write!(f, "unknown"),
         }
     }

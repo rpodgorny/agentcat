@@ -8,6 +8,7 @@ A universal stream formatter for AI coding agent output. Pipe NDJSON streams fro
 - **pi.dev** — `pi --mode json ...`
 - **Gemini CLI** — `gemini -o stream-json -p ...`
 - **Codex CLI** — `codex exec --json ...`
+- **OpenCode** — `opencode run --format json ...`
 
 The input format is auto-detected from the first JSON line, or can be forced with `--format`.
 
@@ -26,6 +27,9 @@ gemini -o stream-json -p "explain this function" | agentcat
 # Codex CLI
 codex exec --json "write tests" | agentcat
 
+# OpenCode
+opencode run --format json "say hello" | agentcat
+
 # Show extended thinking blocks
 claude -p "complex task" --output-format stream-json --verbose --include-partial-messages | agentcat --show-thinking
 ```
@@ -38,7 +42,7 @@ agentcat [OPTIONS]
   --show-thinking     Show extended thinking blocks
   --no-emoji          Disable emoji output
   --no-color          Disable ANSI color output
-  --format <FORMAT>   Force input format (claude|pi|gemini|codex)
+  --format <FORMAT>   Force input format (claude|pi|gemini|codex|opencode)
   --version           Print version
   --help              Print help
 ```
@@ -94,5 +98,5 @@ All known similar tools are Claude Code specific:
 - [format-claude-stream](https://github.com/Khan/format-claude-stream) — TypeScript CLI by Khan Academy, also usable as a library
 - [claude-stream-json-parser](https://github.com/shibuido/claude-stream-json-parser) — Rust library and CLI for parsing Claude Code stream-json output
 
-agentcat is the only tool we know of that supports multiple agent formats (Claude Code, pi.dev, Gemini CLI, Codex) under a single unified interface.
+agentcat is the only tool we know of that supports multiple agent formats (Claude Code, pi.dev, Gemini CLI, Codex, OpenCode) under a single unified interface.
 
