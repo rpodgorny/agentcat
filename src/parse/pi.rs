@@ -6,6 +6,7 @@ pub struct PiParser {
     saw_text_deltas: bool,
     last_done_reason: Option<String>,
     model_emitted: bool,
+    session_ended: bool,
     debug: bool,
 }
 
@@ -15,6 +16,7 @@ impl PiParser {
             saw_text_deltas: false,
             last_done_reason: None,
             model_emitted: false,
+            session_ended: false,
             debug,
         }
     }
@@ -99,7 +101,8 @@ impl PiParser {
                 }
 
                 // Only emit SessionEnd on final "stop" reason
-                if reason == "stop" {
+                if reason == "stop" && !self.session_ended {
+                    self.session_ended = true;
                     let usage = message.get("usage");
 
                     events.push(AgentEvent::SessionEnd {
@@ -123,6 +126,7 @@ impl PiParser {
                 events
             }
             "error" => {
+                self.session_ended = true;
                 let error_msg = ame
                     .get("error")
                     .and_then(|e| {
@@ -181,6 +185,98 @@ impl EventParser for PiParser {
                     model: None,
                 }])
             }
+            "message_start" => {
+                let msg = v.get("message").unwrap_or(&Value::Null);
+                let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                match role {
+                    "user" => {
+                        let text = msg
+                            .get("content")
+                            .and_then(|c| c.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|item| item.get("text"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if text.is_empty() {
+                            Ok(vec![])
+                        } else {
+                            Ok(vec![AgentEvent::UserMessage(text)])
+                        }
+                    }
+                    "assistant" => {
+                        if !self.model_emitted {
+                            let provider = msg.get("provider").and_then(|p| p.as_str());
+                            let model = msg.get("model").and_then(|m| m.as_str());
+                            if let Some(m) = model {
+                                self.model_emitted = true;
+                                let label = match provider {
+                                    Some(p) => format!("{}/{}", p, m),
+                                    None => m.to_string(),
+                                };
+                                Ok(vec![AgentEvent::ModelDetected(label)])
+                            } else {
+                                Ok(vec![])
+                            }
+                        } else {
+                            Ok(vec![])
+                        }
+                    }
+                    _ => Ok(vec![]),
+                }
+            }
+            "message_end" => {
+                let msg = v.get("message").unwrap_or(&Value::Null);
+                let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                if role == "assistant" && !self.session_ended {
+                    let stop_reason = msg.get("stopReason").and_then(|r| r.as_str()).unwrap_or("");
+                    match stop_reason {
+                        "error" => {
+                            self.session_ended = true;
+                            let error_msg = msg
+                                .get("errorMessage")
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("unknown error")
+                                .to_string();
+                            Ok(vec![AgentEvent::SessionEnd {
+                                success: false,
+                                error_type: Some("error".to_string()),
+                                error_message: Some(error_msg),
+                                num_turns: None,
+                                duration_ms: None,
+                                api_duration_ms: None,
+                                cost_usd: None,
+                                input_tokens: None,
+                                output_tokens: None,
+                                cached_tokens: None,
+                            }])
+                        }
+                        "stop" => {
+                            self.session_ended = true;
+                            let usage = msg.get("usage");
+                            Ok(vec![AgentEvent::SessionEnd {
+                                success: true,
+                                error_type: None,
+                                error_message: None,
+                                num_turns: None,
+                                duration_ms: None,
+                                api_duration_ms: None,
+                                cost_usd: None,
+                                input_tokens: usage
+                                    .and_then(|u| u.get("inputTokens").or_else(|| u.get("input")))
+                                    .and_then(|t| t.as_u64()),
+                                output_tokens: usage
+                                    .and_then(|u| u.get("outputTokens").or_else(|| u.get("output")))
+                                    .and_then(|t| t.as_u64()),
+                                cached_tokens: None,
+                            }])
+                        }
+                        _ => Ok(vec![]),
+                    }
+                } else {
+                    Ok(vec![])
+                }
+            }
             "message_update" => Ok(self.parse_message_update(&v)),
             "tool_execution_end" => {
                 let is_error = v
@@ -199,7 +295,6 @@ impl EventParser for PiParser {
             "auto_compaction_start" => Ok(vec![AgentEvent::Compaction]),
             "agent_start" | "agent_end"
             | "turn_start" | "turn_end"
-            | "message_start" | "message_end"
             | "tool_execution_start" | "tool_execution_update"
             | "auto_compaction_end"
             | "auto_retry_start" | "auto_retry_end"
@@ -406,5 +501,75 @@ mod tests {
         let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"turn_start"}"#);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn message_start_user_emits_user_message() {
+        let mut p = PiParser::new(false);
+        let events = parse(&mut p, r#"{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"tell me a joke"}]}}"#);
+        assert_eq!(events, vec![AgentEvent::UserMessage("tell me a joke".into())]);
+    }
+
+    #[test]
+    fn message_start_assistant_emits_model_detected() {
+        let mut p = PiParser::new(false);
+        let events = parse(&mut p, r#"{"type":"message_start","message":{"role":"assistant","content":[],"provider":"zai","model":"glm-5"}}"#);
+        assert_eq!(events, vec![AgentEvent::ModelDetected("zai/glm-5".into())]);
+    }
+
+    #[test]
+    fn message_start_assistant_model_only_once() {
+        let mut p = PiParser::new(false);
+        let e1 = parse(&mut p, r#"{"type":"message_start","message":{"role":"assistant","content":[],"provider":"zai","model":"glm-5"}}"#);
+        assert_eq!(e1, vec![AgentEvent::ModelDetected("zai/glm-5".into())]);
+        let e2 = parse(&mut p, r#"{"type":"message_start","message":{"role":"assistant","content":[],"provider":"zai","model":"glm-5"}}"#);
+        assert!(e2.is_empty());
+    }
+
+    #[test]
+    fn message_start_assistant_no_provider() {
+        let mut p = PiParser::new(false);
+        let events = parse(&mut p, r#"{"type":"message_start","message":{"role":"assistant","content":[],"model":"glm-5"}}"#);
+        assert_eq!(events, vec![AgentEvent::ModelDetected("glm-5".into())]);
+    }
+
+    #[test]
+    fn message_end_assistant_error_emits_session_end() {
+        let mut p = PiParser::new(false);
+        let events = parse(&mut p, r#"{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"Request timed out."}}"#);
+        match &events[0] {
+            AgentEvent::SessionEnd { success, error_type, error_message, .. } => {
+                assert!(!success);
+                assert_eq!(error_type.as_deref(), Some("error"));
+                assert_eq!(error_message.as_deref(), Some("Request timed out."));
+            }
+            other => panic!("expected SessionEnd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn message_end_assistant_stop_emits_session_end() {
+        let mut p = PiParser::new(false);
+        let events = parse(&mut p, r#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"input":100,"output":50}}}"#);
+        match &events[0] {
+            AgentEvent::SessionEnd { success, input_tokens, output_tokens, .. } => {
+                assert!(success);
+                assert_eq!(*input_tokens, Some(100));
+                assert_eq!(*output_tokens, Some(50));
+            }
+            other => panic!("expected SessionEnd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn no_double_session_end() {
+        let mut p = PiParser::new(false);
+        // message_end fires first
+        let e1 = parse(&mut p, r#"{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"timeout"}}"#);
+        assert_eq!(e1.len(), 1);
+        // message_update done fires later — should not emit another SessionEnd
+        let e2 = parse(&mut p, r#"{"type":"message_update","assistantMessageEvent":{"type":"done","reason":"stop","message":{"role":"assistant","usage":{"inputTokens":0,"outputTokens":0}}}}"#);
+        // May emit model but not SessionEnd
+        assert!(!e2.iter().any(|e| matches!(e, AgentEvent::SessionEnd { .. })));
     }
 }
