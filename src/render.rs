@@ -68,13 +68,15 @@ impl Renderer {
         let mut w = stdout.lock();
 
         // Defensive: unexpected events while tools are active → clear tool state
-        // Allow ToolReady, ToolStart, ToolResult through
+        // Allow tool events and lightweight status events through
         if !self.tool_slots.is_empty()
             && !matches!(
                 event,
                 AgentEvent::ToolReady { .. }
                     | AgentEvent::ToolStart { .. }
                     | AgentEvent::ToolResult { .. }
+                    | AgentEvent::Warning(_)
+                    | AgentEvent::Compaction
             )
         {
             self.tool_slots.clear();

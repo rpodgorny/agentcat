@@ -284,20 +284,36 @@ impl EventParser for PiParser {
                     .and_then(|e| e.as_bool())
                     .unwrap_or(false);
                 let id = v.get("toolCallId").and_then(|i| i.as_str()).map(|s| s.to_string());
-                // pi.dev tool_execution_end doesn't always have result content in the event
+                // result can be a string or {"content": [{"type":"text","text":"..."}]}
                 let content = v
                     .get("result")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .and_then(|r| {
+                        if let Some(s) = r.as_str() {
+                            Some(s.to_string())
+                        } else {
+                            r.get("content")
+                                .and_then(|c| c.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                })
+                        }
+                    })
+                    .unwrap_or_default();
                 Ok(vec![AgentEvent::ToolResult { is_error, content, id }])
             }
             "auto_compaction_start" => Ok(vec![AgentEvent::Compaction]),
+            "auto_retry_start" => {
+                self.session_ended = false;
+                Ok(vec![AgentEvent::Warning("Retrying...".to_string())])
+            }
+            "auto_retry_end" => Ok(vec![AgentEvent::Warning("Retry complete".to_string())]),
             "agent_start" | "agent_end"
             | "turn_start" | "turn_end"
             | "tool_execution_start" | "tool_execution_update"
             | "auto_compaction_end"
-            | "auto_retry_start" | "auto_retry_end"
             | "extension_error" => Ok(vec![]),
             other => {
                 if self.debug {
@@ -309,7 +325,23 @@ impl EventParser for PiParser {
     }
 
     fn finish(&mut self) -> Vec<AgentEvent> {
-        vec![]
+        if !self.session_ended {
+            self.session_ended = true;
+            vec![AgentEvent::SessionEnd {
+                success: false,
+                error_type: Some("unexpected_end".to_string()),
+                error_message: Some("stream ended without completion".to_string()),
+                num_turns: None,
+                duration_ms: None,
+                api_duration_ms: None,
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cached_tokens: None,
+            }]
+        } else {
+            vec![]
+        }
     }
 }
 
@@ -403,7 +435,18 @@ mod tests {
     }
 
     #[test]
-    fn tool_execution_end_error() {
+    fn tool_execution_end_with_content_array() {
+        let mut p = PiParser::new(false);
+        let events = parse(&mut p, r#"{"type":"tool_execution_end","toolCallId":"call-123","isError":false,"result":{"content":[{"type":"text","text":"line1\nline2"}]}}"#);
+        assert_eq!(events, vec![AgentEvent::ToolResult {
+            is_error: false,
+            content: "line1\nline2".into(),
+            id: Some("call-123".into()),
+        }]);
+    }
+
+    #[test]
+    fn tool_execution_end_error_string() {
         let mut p = PiParser::new(false);
         let events = parse(&mut p, r#"{"type":"tool_execution_end","toolCallId":"call-123","isError":true,"result":"permission denied"}"#);
         assert_eq!(events, vec![AgentEvent::ToolResult {
@@ -559,6 +602,58 @@ mod tests {
             }
             other => panic!("expected SessionEnd, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn auto_retry_resets_session_ended() {
+        let mut p = PiParser::new(false);
+        // Error sets session_ended = true
+        let e1 = parse(&mut p, r#"{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"rate limited"}}"#);
+        assert_eq!(e1.len(), 1);
+        assert!(matches!(&e1[0], AgentEvent::SessionEnd { success: false, .. }));
+        // auto_retry_start resets session_ended and emits Warning
+        let e2 = parse(&mut p, r#"{"type":"auto_retry_start"}"#);
+        assert_eq!(e2, vec![AgentEvent::Warning("Retrying...".into())]);
+        // Now a successful stop should emit SessionEnd again
+        let e3 = parse(&mut p, r#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"inputTokens":200,"outputTokens":100}}}"#);
+        assert_eq!(e3.len(), 1);
+        match &e3[0] {
+            AgentEvent::SessionEnd { success, input_tokens, output_tokens, .. } => {
+                assert!(success);
+                assert_eq!(*input_tokens, Some(200));
+                assert_eq!(*output_tokens, Some(100));
+            }
+            other => panic!("expected SessionEnd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn finish_emits_fallback_session_end() {
+        let mut p = PiParser::new(false);
+        // Error sets session_ended = true
+        let e1 = parse(&mut p, r#"{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"rate limited"}}"#);
+        assert_eq!(e1.len(), 1);
+        // auto_retry_start resets session_ended
+        parse(&mut p, r#"{"type":"auto_retry_start"}"#);
+        // Stream ends without a new message_end — finish() should emit fallback
+        let e2 = p.finish();
+        assert_eq!(e2.len(), 1);
+        match &e2[0] {
+            AgentEvent::SessionEnd { success, error_type, error_message, .. } => {
+                assert!(!success);
+                assert_eq!(error_type.as_deref(), Some("unexpected_end"));
+                assert_eq!(error_message.as_deref(), Some("stream ended without completion"));
+            }
+            other => panic!("expected SessionEnd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn finish_noop_after_normal_end() {
+        let mut p = PiParser::new(false);
+        parse(&mut p, r#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"inputTokens":1,"outputTokens":1}}}"#);
+        let events = p.finish();
+        assert!(events.is_empty());
     }
 
     #[test]
